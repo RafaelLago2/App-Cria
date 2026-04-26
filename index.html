@@ -305,7 +305,7 @@ window.HELPERS={
       r.onerror=rej;r.readAsDataURL(file);
     });
   },
-  RACES:['Nelore','Braford','Brangus','Wagyu','Outro'],
+  RACES:['Nelore','Angus','Hereford','Braford','Brangus','Wagyu','Outro'],
   CATS:['Vacas','Bezerros','Touros','Vacas gestantes','Novilhas','Garrotes','Reprodutores','Descarte','Outro'],
   HTYPES:['Vacinação','Vermifugação','Medicação','Cura de umbigo','Outro'],
   DCAUSES:['Doença','Acidente','Predador','Parto difícil','Desconhecida','Outro'],
@@ -5241,18 +5241,26 @@ const ONLINE_MOBILE_QUICK=['online-dashboard','online-births','online-inventory'
 /* ─── Layout simplificado para o modo online (provisório) ─── */
 function OnlineLayout({user,page,onNav,onLogout,children}){
   const[sideOpen,setSideOpen]=useState(false);
+  const[collapsed,setCollapsed]=useState(()=>{
+    try{const v=localStorage.getItem('pm_sidebar_collapsed');return v==='1';}catch{return false;}
+  });
+  function toggleCollapsed(){
+    setCollapsed(c=>{const nv=!c;try{localStorage.setItem('pm_sidebar_collapsed',nv?'1':'0');}catch{};return nv;});
+  }
   const nav=ONLINE_NAV.filter(n=>n.roles.includes(user.role));
   const mobileIds=ONLINE_MOBILE_QUICK.filter(id=>nav.find(n=>n.id===id));
+  const sidebarWidth=collapsed?64:230;
+
   return <div style={{display:'flex',minHeight:'100vh',background:'#f4f6f0'}}>
-    <aside style={{width:230,flexShrink:0,background:'#0c4a6e',display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',overflowY:'auto'}} className="pm-sidebar">
-      <OnlineSidebar user={user} nav={nav} page={page} onNav={onNav} onLogout={onLogout}/>
+    <aside style={{width:sidebarWidth,flexShrink:0,background:'#0c4a6e',display:'flex',flexDirection:'column',position:'sticky',top:0,height:'100vh',overflowY:'auto',transition:'width 0.2s'}} className="pm-sidebar">
+      <OnlineSidebar user={user} nav={nav} page={page} onNav={onNav} onLogout={onLogout} collapsed={collapsed} onToggleCollapsed={toggleCollapsed}/>
     </aside>
     {sideOpen&&<div onClick={()=>setSideOpen(false)} style={{position:'fixed',inset:0,zIndex:500,background:'rgba(0,0,0,.55)'}}>
       <aside onClick={e=>e.stopPropagation()} style={{width:260,background:'#0c4a6e',height:'100%',overflowY:'auto'}}>
-        <OnlineSidebar user={user} nav={nav} page={page} onNav={id=>{onNav(id);setSideOpen(false);}} onLogout={onLogout}/>
+        <OnlineSidebar user={user} nav={nav} page={page} onNav={id=>{onNav(id);setSideOpen(false);}} onLogout={onLogout} collapsed={false}/>
       </aside>
     </div>}
-    <main style={{flex:1,minHeight:'100vh'}}>
+    <main style={{flex:1,minHeight:'100vh',minWidth:0}}>
       <div className="pm-topbar" style={{position:'sticky',top:0,zIndex:100,background:'#1e40af',display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0 12px',height:52}}>
         <button onClick={()=>setSideOpen(true)} aria-label="Menu" style={{width:40,height:40,borderRadius:8,background:'rgba(255,255,255,.15)',border:'none',color:'#fff',cursor:'pointer',fontSize:22}}>☰</button>
         <span style={{color:'#fff',fontWeight:700,fontSize:14,textAlign:'center',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:'0 8px'}}>🌐 PecuáriaManager</span>
@@ -5274,25 +5282,34 @@ function OnlineLayout({user,page,onNav,onLogout,children}){
   </div>;
 }
 
-function OnlineSidebar({user,nav,page,onNav,onLogout}){
+function OnlineSidebar({user,nav,page,onNav,onLogout,collapsed,onToggleCollapsed}){
   return <>
-    <div style={{padding:'18px 16px 10px',borderBottom:'1px solid rgba(255,255,255,.08)'}}>
-      <p style={{color:'#fff',fontWeight:700,fontSize:16,marginBottom:4}}>🌐 PecuáriaManager</p>
-      <p style={{color:'rgba(255,255,255,.55)',fontSize:12}}>{user.name||user.email}</p>
-      <span style={{display:'inline-block',marginTop:6,padding:'2px 10px',borderRadius:99,fontSize:10,fontWeight:700,background:user.role==='admin'?'#f59e0b':'#16a34a',color:'#fff'}}>
-        {user.role==='admin'?'★ Administrador':'Colaborador'}
-      </span>
+    <div style={{padding:collapsed?'16px 8px 10px':'18px 16px 10px',borderBottom:'1px solid rgba(255,255,255,.08)',display:'flex',flexDirection:collapsed?'column':'row',alignItems:collapsed?'center':'flex-start',justifyContent:'space-between',gap:8}}>
+      <div style={{flex:1,minWidth:0,overflow:'hidden'}}>
+        <p style={{color:'#fff',fontWeight:700,fontSize:collapsed?22:16,marginBottom:collapsed?0:4,textAlign:collapsed?'center':'left'}}>{collapsed?'🐂':'🌐 PecuáriaManager'}</p>
+        {!collapsed&&<>
+          <p style={{color:'rgba(255,255,255,.55)',fontSize:12,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{user.name||user.email}</p>
+          <span style={{display:'inline-block',marginTop:6,padding:'2px 10px',borderRadius:99,fontSize:10,fontWeight:700,background:user.role==='admin'?'#f59e0b':'#16a34a',color:'#fff'}}>
+            {user.role==='admin'?'★ Administrador':'Colaborador'}
+          </span>
+        </>}
+      </div>
+      {onToggleCollapsed&&<button onClick={onToggleCollapsed} title={collapsed?'Expandir menu':'Recolher menu'} style={{width:30,height:30,borderRadius:6,background:'rgba(255,255,255,.1)',border:'none',color:'#fff',cursor:'pointer',fontSize:14,flexShrink:0}}>
+        {collapsed?'»':'«'}
+      </button>}
     </div>
     <div style={{flex:1,overflowY:'auto',padding:'8px 0'}}>
       {nav.map(n=>{
         const active=page===n.id;
-        return <button key={n.id} onClick={()=>onNav(n.id)} style={{width:'100%',display:'flex',alignItems:'center',gap:10,padding:'10px 16px',background:active?'rgba(255,255,255,.15)':'transparent',border:'none',borderLeft:`3px solid ${active?'#60a5fa':'transparent'}`,color:active?'#fff':'rgba(255,255,255,.6)',cursor:'pointer',textAlign:'left',fontSize:13,fontWeight:active?600:400}}>
-          <span style={{fontSize:15}}>{n.icon}</span>{n.label}
+        return <button key={n.id} onClick={()=>onNav(n.id)} title={n.label}
+          style={{width:'100%',display:'flex',alignItems:'center',gap:10,padding:collapsed?'12px 0':'10px 16px',justifyContent:collapsed&&!active?'center':'flex-start',background:active?'rgba(255,255,255,.15)':'transparent',border:'none',borderLeft:`3px solid ${active?'#60a5fa':'transparent'}`,color:active?'#fff':'rgba(255,255,255,.6)',cursor:'pointer',textAlign:'left',fontSize:13,fontWeight:active?600:400}}>
+          <span style={{fontSize:18,flexShrink:0,width:collapsed?'auto':24,textAlign:'center'}}>{n.icon}</span>
+          {(!collapsed||active)&&<span style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',fontSize:collapsed?11:13}}>{n.label}</span>}
         </button>;
       })}
     </div>
-    <div style={{padding:'12px 16px',borderTop:'1px solid rgba(255,255,255,.08)'}}>
-      <button onClick={onLogout} style={{width:'100%',padding:8,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',borderRadius:8,color:'rgba(255,255,255,.65)',cursor:'pointer',fontSize:12}}>← Sair</button>
+    <div style={{padding:collapsed?'12px 6px':'12px 16px',borderTop:'1px solid rgba(255,255,255,.08)'}}>
+      <button onClick={onLogout} title="Sair" style={{width:'100%',padding:8,background:'rgba(255,255,255,.08)',border:'1px solid rgba(255,255,255,.15)',borderRadius:8,color:'rgba(255,255,255,.65)',cursor:'pointer',fontSize:collapsed?16:12}}>{collapsed?'⏻':'← Sair'}</button>
     </div>
   </>;
 }
@@ -5341,8 +5358,30 @@ function OnlineInventory({user,onNav}){
       if(filterLot&&a.lot_id!==filterLot)return false;
       if(query){const q=query.toLowerCase();if(!(a.identifier||'').toLowerCase().includes(q)&&!(a.farm_tag||'').toLowerCase().includes(q))return false;}
       return true;
-    }).sort((a,b)=>(a.identifier||'').localeCompare(b.identifier||''));
+    }).sort((a,b)=>(a.identifier||'').localeCompare(b.identifier||'',undefined,{numeric:true,sensitivity:'base'}));
   },[items,query,filterStatus,filterLot]);
+
+  // Contagem por lote (apenas animais ativos)
+  const countByLot=useMemo(()=>{
+    const m={};
+    items.filter(a=>(a.status||'ativo')==='ativo').forEach(a=>{
+      const k=a.lot_id||'__no_lot__';
+      m[k]=(m[k]||0)+1;
+    });
+    return m;
+  },[items]);
+
+  // Detectar identifiers duplicados (ativos)
+  const duplicates=useMemo(()=>{
+    const seen={};const dups=[];
+    items.filter(a=>(a.status||'ativo')==='ativo').forEach(a=>{
+      const k=a.identifier;
+      if(!k)return;
+      if(seen[k])dups.push(a.identifier);
+      else seen[k]=true;
+    });
+    return [...new Set(dups)];
+  },[items]);
 
   const stats={
     total:items.length,
@@ -5354,6 +5393,22 @@ function OnlineInventory({user,onNav}){
 
   async function save(data){
     try{
+      // VALIDAÇÃO DE DUPLICIDADE — não pode existir outro animal com mesmo identifier (excluindo o próprio em edição)
+      const id=(data.identifier||'').trim();
+      if(!id){alert('O identificador é obrigatório.');return;}
+      const existing=items.find(a=>(a.identifier||'').toLowerCase()===id.toLowerCase()&&(!editing||a.id!==editing.id));
+      if(existing){alert('⚠️ Já existe um animal com este identificador: '+id+'\n\nNão é permitido cadastrar duplicidade.');return;}
+      // Também verifica farm_tag e official_tag se informados
+      if(data.farm_tag){
+        const f=data.farm_tag.trim();
+        const existsFarm=items.find(a=>a.farm_tag&&a.farm_tag.toLowerCase()===f.toLowerCase()&&(!editing||a.id!==editing.id));
+        if(existsFarm){alert('⚠️ Já existe um animal com este Brinco Fazenda: '+f);return;}
+      }
+      if(data.official_tag){
+        const o=data.official_tag.trim();
+        const existsOff=items.find(a=>a.official_tag&&a.official_tag.toLowerCase()===o.toLowerCase()&&(!editing||a.id!==editing.id));
+        if(existsOff){alert('⚠️ Já existe um animal com este Brinco CIDASC: '+o);return;}
+      }
       if(editing){await window.SupaDB.update('animals',editing.id,data);}
       else{await window.SupaDB.insert('animals',{...data,status:'ativo'});}
       setShowForm(false);setEditing(null);setRev(r=>r+1);
@@ -5368,12 +5423,44 @@ function OnlineInventory({user,onNav}){
 
   return <OnlinePage title="Inventário" subtitle={stats.ativos+' ativos · '+stats.saidos+' saídos'} icon="📋" loading={loading} error={err}
     action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Animal</Btn>}>
+
+    {duplicates.length>0&&<Alert type="error">
+      <strong>⚠️ {duplicates.length} identificador(es) duplicado(s) detectado(s):</strong>
+      <div style={{marginTop:6,fontSize:12,maxHeight:90,overflowY:'auto'}}>
+        {duplicates.slice(0,30).map((d,i)=><span key={i} style={{display:'inline-block',padding:'2px 8px',margin:2,background:'#fee2e2',border:'1px solid #fca5a5',borderRadius:4,fontFamily:'monospace'}}>{d}</span>)}
+        {duplicates.length>30&&<span style={{fontSize:11,color:'#991b1b'}}> ... e +{duplicates.length-30}</span>}
+      </div>
+      <p style={{fontSize:11,marginTop:6}}>Filtre por estes IDs para identificar e ajustar os registros duplicados.</p>
+    </Alert>}
+
     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
       <StatCard label="Ativos" value={stats.ativos} color="green" icon="🐂"/>
       <StatCard label="Saíram" value={stats.saidos} color="gray" icon="📤"/>
       <StatCard label="Fêmeas" value={stats.femeas} color="red"/>
       <StatCard label="Machos" value={stats.machos} color="blue"/>
     </div>
+
+    {/* Resumo por lote */}
+    {lots.length>0&&<Card style={{marginBottom:12}}>
+      <CardHeader title="Animais por Lote" icon="🐄"/>
+      <div style={{padding:'8px 16px',display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:8}}>
+        {lots.map(l=>{
+          const count=countByLot[l.id]||0;
+          return <button key={l.id} onClick={()=>setFilterLot(filterLot===l.id?'':l.id)}
+            style={{padding:'8px 10px',background:filterLot===l.id?'#dbeafe':'#f9fafb',border:'1px solid '+(filterLot===l.id?'#60a5fa':'#e5e7eb'),borderRadius:8,textAlign:'left',cursor:'pointer'}}>
+            <p style={{fontSize:11,color:'#6b7280',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{l.name}</p>
+            <strong style={{fontSize:18,color:filterLot===l.id?'#1e40af':'#111827'}}>{count}</strong>
+            <span style={{fontSize:10,color:'#6b7280',marginLeft:4}}>{count===1?'animal':'animais'}</span>
+          </button>;
+        })}
+        {countByLot['__no_lot__']>0&&<button onClick={()=>setFilterLot(filterLot==='__no_lot__'?'':'__no_lot__')}
+          style={{padding:'8px 10px',background:filterLot==='__no_lot__'?'#fef3c7':'#f9fafb',border:'1px solid '+(filterLot==='__no_lot__'?'#f59e0b':'#e5e7eb'),borderRadius:8,textAlign:'left',cursor:'pointer'}}>
+          <p style={{fontSize:11,color:'#6b7280'}}>⚠ Sem lote</p>
+          <strong style={{fontSize:18,color:'#92400e'}}>{countByLot['__no_lot__']}</strong>
+        </button>}
+      </div>
+    </Card>}
+
     <Card style={{marginBottom:12,padding:12}}>
       <Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar por ID, brinco..." style={{marginBottom:8}}/>
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
@@ -5384,7 +5471,8 @@ function OnlineInventory({user,onNav}){
         </Select>
         <Select value={filterLot} onChange={e=>setFilterLot(e.target.value)}>
           <option value="">Todos os lotes</option>
-          {lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+          <option value="__no_lot__">⚠ Sem lote</option>
+          {lots.map(l=><option key={l.id} value={l.id}>{l.name} ({countByLot[l.id]||0})</option>)}
         </Select>
       </div>
     </Card>
@@ -5393,10 +5481,12 @@ function OnlineInventory({user,onNav}){
         filtered.map(a=>{
           const lot=lots.find(l=>l.id===a.lot_id);
           const saiu=a.status==='saiu';
-          return <ListItem key={a.id} onClick={()=>setDetail(a)} style={saiu?{opacity:.7,background:'#f9fafb'}:{}}>
+          const isDup=duplicates.includes(a.identifier);
+          return <ListItem key={a.id} onClick={()=>setDetail(a)} style={saiu?{opacity:.7,background:'#f9fafb'}:isDup?{background:'#fef2f2',borderLeft:'3px solid #dc2626'}:{}}>
             <div>
               <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
                 <strong style={{fontSize:13,textDecoration:saiu?'line-through':'none'}}>{a.identifier}</strong>
+                {isDup&&<Badge color="red">⚠ Duplicado</Badge>}
                 {saiu&&<Badge color="red">📤 Saiu</Badge>}
                 {!saiu&&<Badge color={a.sex==='Macho'?'blue':'red'}>{a.sex}</Badge>}
                 {!saiu&&<Badge color="gray">{a.type}</Badge>}
@@ -5858,8 +5948,11 @@ function OnlineWeighingForm({initial,lots,onSave,onCancel}){
 function OnlineReproductive({user}){
   const{data:items,loading,error,reload}=useSupaQuery('reproductive_protocols',{order:{column:'date',ascending:false}});
   const{data:lots}=useSupaQuery('lots');
+  const{data:animals}=useSupaQuery('animals');
   const[showForm,setShowForm]=useState(false);
   const[editing,setEditing]=useState(null);
+  const[viewMode,setViewMode]=useState('animal'); // 'animal' | 'lot'
+  const[query,setQuery]=useState('');
 
   async function save(data){
     try{
@@ -5875,21 +5968,88 @@ function OnlineReproductive({user}){
     catch(e){alert('Erro: '+e.message);}
   }
 
+  // Filtrar por busca
+  const filtered=useMemo(()=>{
+    if(!query)return items;
+    const q=query.toLowerCase();
+    return items.filter(p=>(p.cow_id||'').toLowerCase().includes(q)||(p.semen_bull||'').toLowerCase().includes(q));
+  },[items,query]);
+
+  // Agrupar por modo
+  const grouped=useMemo(()=>{
+    if(viewMode==='animal'){
+      // Ordenar por número crescente
+      return [...filtered].sort((a,b)=>(a.cow_id||'').localeCompare(b.cow_id||'',undefined,{numeric:true,sensitivity:'base'}));
+    } else {
+      // Agrupar por lote
+      const g={};
+      filtered.forEach(p=>{
+        // Tenta usar lot_id; se não tiver, busca pelo animal
+        let lotId=p.lot_id;
+        if(!lotId){const a=animals.find(x=>x.identifier===p.cow_id);lotId=a?.lot_id;}
+        const key=lotId||'__no_lot__';
+        if(!g[key])g[key]=[];
+        g[key].push(p);
+      });
+      // Ordenar dentro de cada lote
+      Object.keys(g).forEach(k=>{
+        g[k].sort((a,b)=>(a.cow_id||'').localeCompare(b.cow_id||'',undefined,{numeric:true,sensitivity:'base'}));
+      });
+      return g;
+    }
+  },[filtered,viewMode,animals]);
+
   return <OnlinePage title="Reprodução" subtitle={items.length+' protocolos'} icon="🔬" loading={loading} error={error}
     action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
-    <Card>
-      {items.length===0?<EmptyState icon="🔬" text="Sem protocolos"/>:
-        items.map(p=><ListItem key={p.id} onClick={()=>{setEditing(p);setShowForm(true);}}>
-          <div style={{display:'flex',justifyContent:'space-between'}}>
-            <div>
-              <strong style={{fontSize:13}}>{p.cow_id} — {p.protocol_name}</strong>
-              <p style={{fontSize:11,color:'#6b7280'}}>{p.semen_bull||'—'} · {H.fmtDate(p.date)}</p>
+
+    {/* Modo de visualização */}
+    <div style={{display:'flex',gap:4,marginBottom:12,background:'#f3f4f6',padding:4,borderRadius:10}}>
+      <button onClick={()=>setViewMode('animal')} style={{flex:1,padding:8,background:viewMode==='animal'?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:viewMode==='animal'?600:400,color:viewMode==='animal'?'#1e40af':'#6b7280'}}>🐄 Por animal</button>
+      <button onClick={()=>setViewMode('lot')} style={{flex:1,padding:8,background:viewMode==='lot'?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:viewMode==='lot'?600:400,color:viewMode==='lot'?'#1e40af':'#6b7280'}}>🐂 Por lote</button>
+    </div>
+
+    <Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar por animal ou touro..." style={{marginBottom:12}}/>
+
+    {viewMode==='animal'?
+      <Card>
+        {grouped.length===0?<EmptyState icon="🔬" text="Sem protocolos"/>:
+          grouped.map(p=><ListItem key={p.id} onClick={()=>{setEditing(p);setShowForm(true);}}>
+            <div style={{display:'flex',justifyContent:'space-between'}}>
+              <div>
+                <strong style={{fontSize:13}}>{p.cow_id}</strong> — {p.protocol_name}
+                <p style={{fontSize:11,color:'#6b7280'}}>{p.semen_bull||'—'} · {H.fmtDate(p.date)}</p>
+              </div>
+              {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(p.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
             </div>
-            {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(p.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
-          </div>
-        </ListItem>)
-      }
-    </Card>
+          </ListItem>)
+        }
+      </Card>
+    :
+      <>
+        {Object.keys(grouped).length===0?<EmptyState icon="🔬" text="Sem protocolos"/>:
+          Object.entries(grouped).sort((a,b)=>{
+            const la=lots.find(l=>l.id===a[0])?.name||'ZZZ';
+            const lb=lots.find(l=>l.id===b[0])?.name||'ZZZ';
+            return la.localeCompare(lb);
+          }).map(([lotId,protocols])=>{
+            const lot=lots.find(l=>l.id===lotId);
+            return <Card key={lotId} style={{marginBottom:12}}>
+              <CardHeader title={lot?.name||'⚠ Sem lote definido'} icon="🐂" action={<Badge color="blue">{protocols.length}</Badge>}/>
+              {protocols.map(p=><ListItem key={p.id} onClick={()=>{setEditing(p);setShowForm(true);}}>
+                <div style={{display:'flex',justifyContent:'space-between'}}>
+                  <div>
+                    <strong style={{fontSize:13}}>{p.cow_id}</strong> — {p.protocol_name}
+                    <p style={{fontSize:11,color:'#6b7280'}}>{p.semen_bull||'—'} · {H.fmtDate(p.date)}</p>
+                  </div>
+                  {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(p.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
+                </div>
+              </ListItem>)}
+            </Card>;
+          })
+        }
+      </>
+    }
+
     <Modal open={showForm} onClose={()=>{setShowForm(false);setEditing(null);}} title={editing?'Editar':'Novo Protocolo'} size="lg">
       <OnlineProtocolForm initial={editing} lots={lots} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
     </Modal>
@@ -5898,25 +6058,39 @@ function OnlineReproductive({user}){
 
 function OnlineProtocolForm({initial,lots,onSave,onCancel}){
   const[f,setF]=useState({cow_id:'',lot_id:'',date:TODAY,protocol_name:'IATF',semen_bull:'',bull_race:'',repasse_date:'',repasse_bull:'',notes:'',...initial});
+  const[selectedAnimal,setSelectedAnimal]=useState(null);
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
-  function pickCow(id,a){const upd={cow_id:id};if(a&&a.lot_id)upd.lot_id=a.lot_id;setF(p=>({...p,...upd}));}
+  function pickCow(id,a){
+    setSelectedAnimal(a);
+    const upd={cow_id:id};
+    if(a&&a.lot_id)upd.lot_id=a.lot_id;
+    else if(a&&!a.lot_id)upd.lot_id=null;
+    setF(p=>({...p,...upd}));
+  }
+  const lot=lots.find(l=>l.id===f.lot_id);
   return <>
-    <OnlineAnimalPicker label="Vaca" required value={f.cow_id} onChange={pickCow} sex="Fêmea" types={['Vaca','Novilha']}/>
-    <Field label="Lote"><Select value={f.lot_id||''} onChange={e=>s('lot_id',e.target.value||null)}><option value="">—</option>{lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
+    <OnlineAnimalPicker label="Vaca (do Inventário)" required value={f.cow_id} onChange={pickCow} sex="Fêmea" types={['Vaca','Novilha']}
+      hint="O lote será preenchido automaticamente conforme o cadastro do animal."/>
+
+    {selectedAnimal&&<Alert type="info" style={{marginBottom:12}}>
+      <strong>Lote da vaca:</strong> {lot?.name||<span style={{color:'#dc2626'}}>⚠ Sem lote no Inventário</span>}
+      <p style={{fontSize:11,color:'#6b7280',marginTop:4}}>O lote vem do cadastro do animal e é atualizado automaticamente se ele mudar de lote.</p>
+    </Alert>}
+
     <FormRow>
-      <Field label="Data"><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
+      <Field label="Data" required><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
       <Field label="Protocolo"><Input value={f.protocol_name||''} onChange={e=>s('protocol_name',e.target.value)} placeholder="IATF"/></Field>
     </FormRow>
     <FormRow>
       <Field label="Touro/Sêmen"><Input value={f.semen_bull||''} onChange={e=>s('semen_bull',e.target.value)}/></Field>
-      <Field label="Raça"><Select value={f.bull_race||''} onChange={e=>s('bull_race',e.target.value)}><option value="">—</option>{H.RACES.map(r=><option key={r}>{r}</option>)}</Select></Field>
+      <Field label="Raça do Touro"><Select value={f.bull_race||''} onChange={e=>s('bull_race',e.target.value)}><option value="">—</option>{H.RACES.map(r=><option key={r}>{r}</option>)}</Select></Field>
     </FormRow>
     <FormRow>
       <Field label="Data Repasse"><Input type="date" value={f.repasse_date||''} onChange={e=>s('repasse_date',e.target.value||null)}/></Field>
       <Field label="Touro Repasse"><Input value={f.repasse_bull||''} onChange={e=>s('repasse_bull',e.target.value)}/></Field>
     </FormRow>
     <Field label="Observações"><Textarea value={f.notes||''} onChange={e=>s('notes',e.target.value)}/></Field>
-    <FormActions onSave={()=>{if(!f.cow_id)return alert('Selecione a vaca');onSave(f);}} onCancel={onCancel}/>
+    <FormActions onSave={()=>{if(!f.cow_id)return alert('Selecione a vaca no Inventário');onSave(f);}} onCancel={onCancel}/>
   </>;
 }
 
