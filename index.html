@@ -473,12 +473,11 @@ window.SupaDB={
 
     // Tabelas em ordem de dependência (1º independentes, depois as que referenciam outras)
     const STAGES=[
-      // Etapa 1: tabelas independentes
       {table:'pastures',label:'Pastos',refs:{}},
       {table:'lots',label:'Lotes',refs:{pasture_id:'pastures'}},
-      {table:'animals',label:'Animais',refs:{lot_id:'lots'}},
+      {table:'animals',label:'Animais',refs:{lot_id:'lots'},dedupe:'identifier'},
       {table:'animal_lot_history',label:'Histórico de lotes',refs:{animal_id:'animals',from_lot_id:'lots',to_lot_id:'lots'}},
-      {table:'pasture_movements',label:'Movimentações de pastos',refs:{lot_id:'lots',pasture_id:'pastures'}},
+      {table:'pasture_movements',label:'Movimentações de pastos',refs:{lot_id:'lots',pasture_id:'pastures'},required:['entry_date','lot_id','pasture_id']},
       {table:'births',label:'Nascimentos',refs:{lot_id:'lots',pasture_id:'pastures'}},
       {table:'deaths',label:'Mortalidade',refs:{lot_id:'lots',pasture_id:'pastures'}},
       {table:'health_managements',label:'Manejos sanitários',refs:{lot_id:'lots'}},
@@ -493,34 +492,27 @@ window.SupaDB={
       {table:'costs',label:'Custos',refs:{}},
     ];
 
-    // Campos que devem ser SEMPRE removidos por serem incompatíveis
     const REMOVE_FIELDS=['sync_status','collaborator_id','responsible_id','created_by','death_id','updated_at','created_at'];
-    // Campos numéricos que podem vir como string vazia "" (causa erro)
     const NUMERIC_FIELDS=['area_ha','capacity','count','quantity','total_value','per_head_value','sale_value','value','weight','birth_weight'];
-    // Campos UUID opcionais
     const UUID_FIELDS_REFS=['pasture_id','lot_id','animal_id','from_lot_id','to_lot_id'];
 
     function cleanRow(r,refs){
       const c={...r};
-      // Remover campos problemáticos
       REMOVE_FIELDS.forEach(f=>{delete c[f];});
-      delete c.id; // Supabase gera UUID novo
-      // Mapear referências para novos UUIDs
+      delete c.id;
       Object.entries(refs).forEach(([field,refTable])=>{
         if(c[field]){
           const oldId=c[field];
           const newId=idMap[refTable]?.[oldId];
           if(newId)c[field]=newId;
-          else delete c[field]; // Se não achou mapeamento, remove (deixa null)
+          else delete c[field];
         }
       });
-      // Limpar UUIDs órfãos (campos que não foram mapeados explicitamente mas têm valores tipo "u1")
       UUID_FIELDS_REFS.forEach(f=>{
         if(c[f]&&typeof c[f]==='string'&&c[f].length<20&&!c[f].includes('-')){
           delete c[f];
         }
       });
-      // Sanitizar campos numéricos vazios
       NUMERIC_FIELDS.forEach(f=>{
         if(c[f]===''||c[f]===null||c[f]===undefined)delete c[f];
         else if(typeof c[f]==='string'){
@@ -528,7 +520,6 @@ window.SupaDB={
           if(!isNaN(n))c[f]=n;else delete c[f];
         }
       });
-      // Datas vazias
       ['date','birth_date','death_date','diagnosis_date','expected_birth_date','repasse_date','exit_date','entry_date'].forEach(f=>{
         if(c[f]==='')delete c[f];
       });
@@ -537,29 +528,54 @@ window.SupaDB={
 
     const result={success:[],errors:[]};
     for(const stage of STAGES){
-      const{table,label,refs}=stage;
+      const{table,label,refs,dedupe,required}=stage;
       try{
-        const rows=Array.isArray(localData[table])?localData[table]:[];
-        if(rows.length===0){result.success.push({table,label,count:0});if(onProgress)onProgress({table,label,count:0});continue;}
-        let totalInserted=0;
-        // Insert em chunks de 50, capturando IDs novos
-        for(let i=0;i<rows.length;i+=50){
-          const chunk=rows.slice(i,i+50);
-          const cleanChunk=chunk.map(r=>cleanRow(r,refs));
-          const{data,error}=await _sup().from(table).insert(cleanChunk).select('id');
-          if(error)throw error;
-          // Mapear: oldId → newId
-          if(data&&data.length===chunk.length){
-            chunk.forEach((orig,idx)=>{
-              if(orig.id&&data[idx]?.id){
-                idMap[table][orig.id]=data[idx].id;
-              }
-            });
-          }
-          totalInserted+=cleanChunk.length;
+        let rows=Array.isArray(localData[table])?localData[table]:[];
+        const originalCount=rows.length;
+        let skippedCount=0;
+
+        // Deduplicação: mantém só o primeiro registro com cada valor único
+        if(dedupe){
+          const seen=new Set();
+          rows=rows.filter(r=>{
+            const v=r[dedupe];
+            if(!v)return true;
+            if(seen.has(v)){skippedCount++;return false;}
+            seen.add(v);return true;
+          });
         }
-        result.success.push({table,label,count:totalInserted});
-        if(onProgress)onProgress({table,label,count:totalInserted,total:STAGES.length});
+
+        // Filtrar registros que não tem campos obrigatórios
+        if(required){
+          rows=rows.filter(r=>{
+            const ok=required.every(f=>r[f]&&r[f]!=='');
+            if(!ok)skippedCount++;
+            return ok;
+          });
+        }
+
+        if(rows.length===0){
+          result.success.push({table,label,count:0,skipped:skippedCount,total:originalCount});
+          if(onProgress)onProgress({table,label,count:0});
+          continue;
+        }
+
+        // Insert 1 a 1 (mais lento, mas tolerante a falhas individuais)
+        let inserted=0;
+        let perRowErrors=0;
+        for(const orig of rows){
+          try{
+            const cleaned=cleanRow(orig,refs);
+            const{data,error}=await _sup().from(table).insert([cleaned]).select('id').single();
+            if(error){perRowErrors++;continue;}
+            if(orig.id&&data?.id){
+              idMap[table][orig.id]=data.id;
+            }
+            inserted++;
+          }catch{perRowErrors++;}
+        }
+        result.success.push({table,label,count:inserted,skipped:skippedCount,errors:perRowErrors,total:originalCount});
+        if(onProgress)onProgress({table,label,count:inserted,skipped:skippedCount,errors:perRowErrors});
       }catch(e){
         result.errors.push({table,label,error:e.message||String(e)});
       }
@@ -5001,7 +5017,11 @@ function MigrationTool({onDone}){
       {stage==='done'&&<>
         {result&&result.success.length>0&&<Alert type="success">
           <strong>✅ Migração concluída!</strong>
-          <ul style={{margin:'6px 0 0 18px',fontSize:12}}>{result.success.map((s,i)=><li key={i}>{s.label}: {s.count}</li>)}</ul>
+          <ul style={{margin:'6px 0 0 18px',fontSize:12}}>{result.success.map((s,i)=><li key={i}>
+            {s.label}: <strong>{s.count}</strong>
+            {s.skipped>0&&<span style={{color:'#92400e'}}> (⚠ {s.skipped} pulados)</span>}
+            {s.errors>0&&<span style={{color:'#991b1b'}}> (❌ {s.errors} erros)</span>}
+          </li>)}</ul>
         </Alert>}
         {result&&result.errors.length>0&&<Alert type="error">
           <strong>⚠ Alguns erros:</strong>
