@@ -462,47 +462,104 @@ window.SupaDB={
     if(!window.SUPA||!window.SUPA.currentProfile||window.SUPA.currentProfile.role!=='admin'){
       throw new Error('Apenas admin pode migrar dados.');
     }
+    // Mapeamento de IDs antigos → novos UUIDs gerados pelo Supabase
+    const idMap={
+      pastures:{}, lots:{}, animals:{}, profiles:{},
+      births:{}, deaths:{}, weighings:{}, reproductive_protocols:{}, pregnancy_diagnoses:{},
+      health_managements:{}, herbicide_applications:{}, mineral_supplementations:{},
+      feces_records:{}, pasture_movements:{}, animal_lot_history:{}, animal_exits:{},
+      revenues:{}, costs:{},
+    };
+
+    // Tabelas em ordem de dependência (1º independentes, depois as que referenciam outras)
     const STAGES=[
-      ['pastures','Pastos'],
-      ['lots','Lotes'],
-      ['animals','Animais'],
-      ['births','Nascimentos'],
-      ['deaths','Mortalidade'],
-      ['health_managements','Manejos sanitários'],
-      ['herbicide_applications','Herbicida'],
-      ['mineral_supplementations','Sal mineral'],
-      ['weighings','Pesagens'],
-      ['reproductive_protocols','Reprodução'],
-      ['pregnancy_diagnoses','Gestação'],
-      ['feces_records','Fezes'],
-      ['pasture_movements','Movimentações de pastos'],
-      ['animal_lot_history','Histórico de lotes'],
-      ['animal_exits','Saídas'],
-      ['revenues','Receitas'],
-      ['costs','Custos'],
+      // Etapa 1: tabelas independentes
+      {table:'pastures',label:'Pastos',refs:{}},
+      {table:'lots',label:'Lotes',refs:{pasture_id:'pastures'}},
+      {table:'animals',label:'Animais',refs:{lot_id:'lots'}},
+      {table:'animal_lot_history',label:'Histórico de lotes',refs:{animal_id:'animals',from_lot_id:'lots',to_lot_id:'lots'}},
+      {table:'pasture_movements',label:'Movimentações de pastos',refs:{lot_id:'lots',pasture_id:'pastures'}},
+      {table:'births',label:'Nascimentos',refs:{lot_id:'lots',pasture_id:'pastures'}},
+      {table:'deaths',label:'Mortalidade',refs:{lot_id:'lots',pasture_id:'pastures'}},
+      {table:'health_managements',label:'Manejos sanitários',refs:{lot_id:'lots'}},
+      {table:'herbicide_applications',label:'Herbicida',refs:{pasture_id:'pastures'}},
+      {table:'mineral_supplementations',label:'Sal mineral',refs:{lot_id:'lots',pasture_id:'pastures'}},
+      {table:'weighings',label:'Pesagens',refs:{lot_id:'lots'}},
+      {table:'reproductive_protocols',label:'Reprodução',refs:{lot_id:'lots'}},
+      {table:'pregnancy_diagnoses',label:'Gestação',refs:{lot_id:'lots'}},
+      {table:'feces_records',label:'Fezes',refs:{lot_id:'lots',pasture_id:'pastures'}},
+      {table:'animal_exits',label:'Saídas',refs:{animal_id:'animals'}},
+      {table:'revenues',label:'Receitas',refs:{}},
+      {table:'costs',label:'Custos',refs:{}},
     ];
+
+    // Campos que devem ser SEMPRE removidos por serem incompatíveis
+    const REMOVE_FIELDS=['sync_status','collaborator_id','responsible_id','created_by','death_id','updated_at','created_at'];
+    // Campos numéricos que podem vir como string vazia "" (causa erro)
+    const NUMERIC_FIELDS=['area_ha','capacity','count','quantity','total_value','per_head_value','sale_value','value','weight','birth_weight'];
+    // Campos UUID opcionais
+    const UUID_FIELDS_REFS=['pasture_id','lot_id','animal_id','from_lot_id','to_lot_id'];
+
+    function cleanRow(r,refs){
+      const c={...r};
+      // Remover campos problemáticos
+      REMOVE_FIELDS.forEach(f=>{delete c[f];});
+      delete c.id; // Supabase gera UUID novo
+      // Mapear referências para novos UUIDs
+      Object.entries(refs).forEach(([field,refTable])=>{
+        if(c[field]){
+          const oldId=c[field];
+          const newId=idMap[refTable]?.[oldId];
+          if(newId)c[field]=newId;
+          else delete c[field]; // Se não achou mapeamento, remove (deixa null)
+        }
+      });
+      // Limpar UUIDs órfãos (campos que não foram mapeados explicitamente mas têm valores tipo "u1")
+      UUID_FIELDS_REFS.forEach(f=>{
+        if(c[f]&&typeof c[f]==='string'&&c[f].length<20&&!c[f].includes('-')){
+          delete c[f];
+        }
+      });
+      // Sanitizar campos numéricos vazios
+      NUMERIC_FIELDS.forEach(f=>{
+        if(c[f]===''||c[f]===null||c[f]===undefined)delete c[f];
+        else if(typeof c[f]==='string'){
+          const n=parseFloat(c[f]);
+          if(!isNaN(n))c[f]=n;else delete c[f];
+        }
+      });
+      // Datas vazias
+      ['date','birth_date','death_date','diagnosis_date','expected_birth_date','repasse_date','exit_date','entry_date'].forEach(f=>{
+        if(c[f]==='')delete c[f];
+      });
+      return c;
+    }
+
     const result={success:[],errors:[]};
-    for(const[table,label]of STAGES){
+    for(const stage of STAGES){
+      const{table,label,refs}=stage;
       try{
         const rows=Array.isArray(localData[table])?localData[table]:[];
-        if(rows.length===0){result.success.push({table,label,count:0});continue;}
-        // Limpar campos que o Supabase não aceita
-        const clean=rows.map(r=>{
-          const c={...r};
-          delete c.sync_status;
-          // ids do localStorage podem ser strings tipo "ani_123" — Supabase precisa de UUID
-          // Vamos REMOVER o id e deixar o Supabase gerar
-          delete c.id;
-          return c;
-        });
-        // Insert em chunks de 100
-        for(let i=0;i<clean.length;i+=100){
-          const chunk=clean.slice(i,i+100);
-          const{error}=await _sup().from(table).insert(chunk);
+        if(rows.length===0){result.success.push({table,label,count:0});if(onProgress)onProgress({table,label,count:0});continue;}
+        let totalInserted=0;
+        // Insert em chunks de 50, capturando IDs novos
+        for(let i=0;i<rows.length;i+=50){
+          const chunk=rows.slice(i,i+50);
+          const cleanChunk=chunk.map(r=>cleanRow(r,refs));
+          const{data,error}=await _sup().from(table).insert(cleanChunk).select('id');
           if(error)throw error;
+          // Mapear: oldId → newId
+          if(data&&data.length===chunk.length){
+            chunk.forEach((orig,idx)=>{
+              if(orig.id&&data[idx]?.id){
+                idMap[table][orig.id]=data[idx].id;
+              }
+            });
+          }
+          totalInserted+=cleanChunk.length;
         }
-        result.success.push({table,label,count:rows.length});
-        if(onProgress)onProgress({table,label,count:rows.length,total:STAGES.length});
+        result.success.push({table,label,count:totalInserted});
+        if(onProgress)onProgress({table,label,count:totalInserted,total:STAGES.length});
       }catch(e){
         result.errors.push({table,label,error:e.message||String(e)});
       }
