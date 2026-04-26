@@ -4848,15 +4848,52 @@ function MigrationTool({onDone}){
   const[progress,setProgress]=useState([]);
   const[errors,setErrors]=useState([]);
   const[result,setResult]=useState(null);
+  const fileRef=useRef();
 
-  async function start(){
-    if(!confirm('🚀 Iniciar migração?\n\nIsso vai SUBIR todos os dados do seu navegador (modo Local) para o Supabase.\n\nProcessos:\n1. Lê seu localStorage atual\n2. Envia para a nuvem\n\nNão apaga seus dados locais. Pode ser interrompido se der erro.\n\nProsseguir?'))return;
+  async function startFromLocalStorage(){
+    if(!confirm('🚀 Iniciar migração do localStorage?\n\nIsso vai SUBIR todos os dados deste navegador (modo Local) para o Supabase.\n\nProsseguir?'))return;
+    const raw=localStorage.getItem('pm_data_v1');
+    if(!raw){alert('Nenhum dado local encontrado neste navegador.\n\nUse a opção "Carregar arquivo de backup" se você tem um arquivo JSON salvo de outro dispositivo.');return;}
+    await runMigration(JSON.parse(raw),'localStorage');
+  }
+
+  async function handleFileUpload(e){
+    const file=e.target.files[0];
+    if(!file)return;
+    const reader=new FileReader();
+    reader.onload=async(ev)=>{
+      try{
+        const parsed=JSON.parse(ev.target.result);
+        // Aceita 2 formatos: backup completo (_pm_backup) ou dados diretos
+        const data=parsed.data||parsed;
+        if(!data||(!Array.isArray(data.animals)&&!Array.isArray(data.births)&&!Array.isArray(data.pastures))){
+          alert('Arquivo não parece ser um backup válido do PecuáriaManager.');
+          return;
+        }
+        const counts={
+          Animais:(data.animals||[]).length,
+          Nascimentos:(data.births||[]).length,
+          Pastos:(data.pastures||[]).length,
+          Lotes:(data.lots||[]).length,
+          Pesagens:(data.weighings||[]).length,
+          Custos:(data.costs||[]).length,
+          Receitas:(data.revenues||[]).length,
+        };
+        const summary=Object.entries(counts).filter(([,v])=>v>0).map(([k,v])=>`${k}: ${v}`).join('\n');
+        if(!confirm(`Arquivo lido com sucesso!\n\nConteúdo encontrado:\n${summary}\n\nProsseguir com a migração para o Supabase?`))return;
+        await runMigration(data,'arquivo');
+      }catch(err){
+        alert('Erro ao ler arquivo: '+err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value='';
+  }
+
+  async function runMigration(data,source){
     setStage('running');setProgress([]);setErrors([]);
     try{
-      const raw=localStorage.getItem('pm_data_v1');
-      if(!raw){alert('Nenhum dado local encontrado.');setStage('idle');return;}
-      const local=JSON.parse(raw);
-      const r=await window.SupaDB.migrateFromLocal(local,(p)=>{
+      const r=await window.SupaDB.migrateFromLocal(data,(p)=>{
         setProgress(prev=>[...prev,p]);
       });
       setResult(r);setStage('done');
@@ -4868,22 +4905,34 @@ function MigrationTool({onDone}){
   }
 
   return <Card style={{marginBottom:16}}>
-    <CardHeader title="Migrar dados do Modo Local para Online" icon="🚀"/>
+    <CardHeader title="Migrar dados para o Supabase" icon="🚀"/>
     <div style={{padding:16}}>
       {stage==='idle'&&<>
         <Alert type="info">
-          Esta ferramenta sobe TODOS os dados do seu navegador local para o Supabase em nuvem.
+          Esta ferramenta sobe TODOS os dados do PecuáriaManager para o Supabase (nuvem).
           <br/><br/>
-          <strong>Quando usar:</strong> apenas uma vez, depois que o banco Supabase estiver pronto e você quiser começar a usar o modo online com seus dados atuais.
-          <br/><br/>
-          <strong>Pré-requisitos:</strong>
-          <ol style={{margin:'8px 0 0 18px',padding:0,fontSize:12,lineHeight:1.6}}>
-            <li>Banco Supabase configurado (script SQL rodado)</li>
-            <li>Você logado como ADMIN no modo online</li>
-            <li>Banco Supabase vazio (primeira migração)</li>
-          </ol>
+          <strong>Você tem 2 opções:</strong>
         </Alert>
-        <Btn onClick={start} fullWidth>🚀 Iniciar Migração</Btn>
+
+        <div style={{display:'grid',gap:12,marginBottom:12}}>
+          <div style={{padding:14,background:'#f0fdf4',border:'1px solid #86efac',borderRadius:10}}>
+            <strong style={{fontSize:13,color:'#166534'}}>📂 Opção 1: Do arquivo de backup (.json)</strong>
+            <p style={{fontSize:12,color:'#374151',margin:'6px 0 10px'}}>
+              Use essa opção se você está em um navegador novo (ex: outro computador, ou o app online pela primeira vez)
+              e tem um arquivo de backup do PecuáriaManager salvo.
+            </p>
+            <Btn onClick={()=>fileRef.current.click()} fullWidth>📂 Carregar arquivo de backup</Btn>
+            <input ref={fileRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={handleFileUpload}/>
+          </div>
+
+          <div style={{padding:14,background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:10}}>
+            <strong style={{fontSize:13,color:'#1e3a8a'}}>💾 Opção 2: Do navegador atual</strong>
+            <p style={{fontSize:12,color:'#374151',margin:'6px 0 10px'}}>
+              Use essa opção apenas se você JÁ TEM dados salvos neste mesmo navegador (modo Local).
+            </p>
+            <Btn variant="secondary" onClick={startFromLocalStorage} fullWidth>💾 Migrar do localStorage</Btn>
+          </div>
+        </div>
       </>}
       {stage==='running'&&<>
         <Alert type="warning">⏳ Migrando... NÃO feche essa janela.</Alert>
