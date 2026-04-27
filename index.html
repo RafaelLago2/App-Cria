@@ -5207,14 +5207,26 @@ function OnlineDashboard({user,onNav}){
       </div>
 
       <p style={{fontSize:11,fontWeight:600,color:'#6b7280',textTransform:'uppercase',marginBottom:10,marginTop:16}}>Ações rápidas</p>
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-        {[['🐮','Nascimento','online-births','#166534'],['📋','Inventário','online-inventory','#1d4ed8'],['⚖️','Pesagem','online-weighings','#d97706'],['🤰','Gestação','online-pregnancy','#9333ea']].map(([i,l,p,c])=>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+        {[['🐮','Nascimento','online-births','#166534'],['📋','Inventário','online-inventory','#1d4ed8'],['⚖️','Pesagem','online-weighings','#d97706'],['🤰','Gestação','online-pregnancy','#9333ea'],['🔍','Buscar Animal','online-search','#0891b2'],['🔬','Reprodução','online-reproductive','#be185d']].map(([i,l,p,c])=>
           <button key={p} onClick={()=>onNav(p)} style={{padding:'16px 12px',background:c,color:'#fff',borderRadius:12,textAlign:'left',cursor:'pointer',border:'none'}}>
             <div style={{fontSize:26,marginBottom:6}}>{i}</div>
             <div style={{fontSize:12,fontWeight:600}}>{l}</div>
           </button>
         )}
       </div>
+
+      {user.role==='admin'&&<>
+        <p style={{fontSize:11,fontWeight:600,color:'#6b7280',textTransform:'uppercase',marginBottom:10,marginTop:8}}>Análises e Relatórios</p>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+          {[['📊','Análises','online-analysis','#7c3aed'],['📑','Relatório de Safra','online-safra','#0c4a6e'],['📥','Exportar CSV','online-export','#059669'],['👥','Colaboradores','online-collaborators','#1e40af']].map(([i,l,p,c])=>
+            <button key={p} onClick={()=>onNav(p)} style={{padding:'14px 12px',background:c,color:'#fff',borderRadius:12,textAlign:'left',cursor:'pointer',border:'none'}}>
+              <div style={{fontSize:22,marginBottom:4}}>{i}</div>
+              <div style={{fontSize:11,fontWeight:600}}>{l}</div>
+            </button>
+          )}
+        </div>
+      </>}
     </div>
   </div>;
 }
@@ -5222,6 +5234,7 @@ function OnlineDashboard({user,onNav}){
 /* ─── NAV do modo online (filtrado por role) ─── */
 const ONLINE_NAV=[
   {id:'online-dashboard',icon:'🏠',label:'Dashboard',roles:['admin','collaborator']},
+  {id:'online-search',icon:'🔍',label:'Busca',roles:['admin','collaborator']},
   {id:'online-births',icon:'🐮',label:'Nascimentos',roles:['admin','collaborator']},
   {id:'online-mortality',icon:'✝',label:'Mortalidade',roles:['admin','collaborator']},
   {id:'online-lots',icon:'🐂',label:'Lotes',roles:['admin','collaborator']},
@@ -5229,10 +5242,17 @@ const ONLINE_NAV=[
   {id:'online-weighings',icon:'⚖️',label:'Pesagens',roles:['admin','collaborator']},
   {id:'online-reproductive',icon:'🔬',label:'Reprodução',roles:['admin','collaborator']},
   {id:'online-pregnancy',icon:'🤰',label:'Gestação',roles:['admin','collaborator']},
+  {id:'online-health',icon:'💉',label:'Manejos sanit.',roles:['admin','collaborator']},
+  {id:'online-herbicide',icon:'🌿',label:'Herbicida',roles:['admin','collaborator']},
+  {id:'online-mineral',icon:'🧂',label:'Sal mineral',roles:['admin','collaborator']},
+  {id:'online-feces',icon:'🔍',label:'Fezes',roles:['admin','collaborator']},
   {id:'online-inventory',icon:'📋',label:'Inventário',roles:['admin','collaborator']},
   {id:'online-exits',icon:'📤',label:'Saída de Animais',roles:['admin']},
   {id:'online-revenues',icon:'💰',label:'Receitas',roles:['admin']},
   {id:'online-costs',icon:'💵',label:'Custos',roles:['admin']},
+  {id:'online-analysis',icon:'📊',label:'Análises',roles:['admin']},
+  {id:'online-safra',icon:'📑',label:'Relatório Safra',roles:['admin']},
+  {id:'online-export',icon:'📥',label:'Exportar CSV',roles:['admin']},
   {id:'online-collaborators',icon:'👥',label:'Colaboradores',roles:['admin']},
   {id:'online-settings',icon:'⚙️',label:'Configurações',roles:['admin']},
 ];
@@ -6378,9 +6398,684 @@ function OnlineCostForm({initial,onSave,onCancel}){
   </>;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
-   FIM DOS MÓDULOS ONLINE
-   ═══════════════════════════════════════════════════════════════════ */
+/* ─── MANEJOS SANITÁRIOS ONLINE ─── */
+function OnlineHealthManagements({user}){
+  const{data:items,loading,error,reload}=useSupaQuery('health_managements',{order:{column:'date',ascending:false}});
+  const{data:lots}=useSupaQuery('lots');
+  const[showForm,setShowForm]=useState(false);
+  const[editing,setEditing]=useState(null);
+  const[query,setQuery]=useState('');
+
+  async function save(data){
+    try{
+      if(editing)await window.SupaDB.update('health_managements',editing.id,data);
+      else await window.SupaDB.insert('health_managements',data);
+      setShowForm(false);setEditing(null);reload();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+  async function del(id){
+    if(user.role!=='admin'){alert('Apenas admin pode apagar.');return;}
+    if(!confirm('Excluir?'))return;
+    try{await window.SupaDB.remove('health_managements',id);reload();}
+    catch(e){alert('Erro: '+e.message);}
+  }
+
+  const filtered=query?items.filter(m=>(m.product+' '+m.type+' '+m.observations).toLowerCase().includes(query.toLowerCase())):items;
+
+  return <OnlinePage title="Manejos Sanitários" subtitle={items.length+' registros'} icon="💉" loading={loading} error={error}
+    action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
+    <Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar..." style={{marginBottom:12}}/>
+    <Card>
+      {filtered.length===0?<EmptyState icon="💉" text="Sem manejos"/>:
+        filtered.map(m=>{
+          const lot=lots.find(l=>l.id===m.lot_id);
+          return <ListItem key={m.id} onClick={()=>{setEditing(m);setShowForm(true);}}>
+            <div style={{display:'flex',justifyContent:'space-between'}}>
+              <div>
+                <strong style={{fontSize:13}}>{m.type}</strong> — {m.product||'—'}
+                <p style={{fontSize:11,color:'#6b7280'}}>{lot?.name||'—'} · {H.fmtDate(m.date)} · {m.dose||'—'}</p>
+              </div>
+              {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(m.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
+            </div>
+          </ListItem>;
+        })
+      }
+    </Card>
+    <Modal open={showForm} onClose={()=>{setShowForm(false);setEditing(null);}} title={editing?'Editar':'Novo Manejo'} size="lg">
+      <OnlineHealthForm initial={editing} lots={lots} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
+    </Modal>
+  </OnlinePage>;
+}
+
+function OnlineHealthForm({initial,lots,onSave,onCancel}){
+  const[f,setF]=useState({type:'Vacinação',product:'',dose:'',date:TODAY,lot_id:'',category:'Vacas',animals_count:0,observations:'',...initial});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  return <>
+    <FormRow>
+      <Field label="Tipo" required><Select value={f.type} onChange={e=>s('type',e.target.value)}>{H.HTYPES.map(t=><option key={t}>{t}</option>)}</Select></Field>
+      <Field label="Data" required><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
+    </FormRow>
+    <FormRow>
+      <Field label="Produto"><Input value={f.product||''} onChange={e=>s('product',e.target.value)}/></Field>
+      <Field label="Dose"><Input value={f.dose||''} onChange={e=>s('dose',e.target.value)} placeholder="Ex: 5ml/cab"/></Field>
+    </FormRow>
+    <FormRow>
+      <Field label="Lote"><Select value={f.lot_id||''} onChange={e=>s('lot_id',e.target.value||null)}><option value="">—</option>{lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
+      <Field label="Categoria"><Select value={f.category} onChange={e=>s('category',e.target.value)}>{H.CATS.map(c=><option key={c}>{c}</option>)}</Select></Field>
+    </FormRow>
+    <Field label="Nº Animais Tratados"><Input type="number" value={f.animals_count||0} onChange={e=>s('animals_count',parseInt(e.target.value)||0)}/></Field>
+    <Field label="Observações"><Textarea value={f.observations||''} onChange={e=>s('observations',e.target.value)}/></Field>
+    <FormActions onSave={()=>onSave(f)} onCancel={onCancel}/>
+  </>;
+}
+
+/* ─── HERBICIDA ONLINE ─── */
+function OnlineHerbicide({user}){
+  const{data:items,loading,error,reload}=useSupaQuery('herbicide_applications',{order:{column:'date',ascending:false}});
+  const{data:pastures}=useSupaQuery('pastures');
+  const[showForm,setShowForm]=useState(false);
+  const[editing,setEditing]=useState(null);
+
+  async function save(data){
+    try{
+      if(editing)await window.SupaDB.update('herbicide_applications',editing.id,data);
+      else await window.SupaDB.insert('herbicide_applications',data);
+      setShowForm(false);setEditing(null);reload();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+  async function del(id){
+    if(user.role!=='admin'){alert('Apenas admin pode apagar.');return;}
+    if(!confirm('Excluir?'))return;
+    try{await window.SupaDB.remove('herbicide_applications',id);reload();}
+    catch(e){alert('Erro: '+e.message);}
+  }
+
+  return <OnlinePage title="Herbicida" subtitle={items.length+' aplicações'} icon="🌿" loading={loading} error={error}
+    action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Aplicação</Btn>}>
+    <Card>
+      {items.length===0?<EmptyState icon="🌿" text="Sem aplicações"/>:
+        items.map(h=>{
+          const past=pastures.find(p=>p.id===h.pasture_id);
+          return <ListItem key={h.id} onClick={()=>{setEditing(h);setShowForm(true);}}>
+            <div style={{display:'flex',justifyContent:'space-between'}}>
+              <div>
+                <strong style={{fontSize:13}}>{h.product||'Sem produto'}</strong>
+                <p style={{fontSize:11,color:'#6b7280'}}>{past?.name||'—'} · {H.fmtDate(h.date)} · {h.dose||'—'}</p>
+              </div>
+              {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(h.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
+            </div>
+          </ListItem>;
+        })
+      }
+    </Card>
+    <Modal open={showForm} onClose={()=>{setShowForm(false);setEditing(null);}} title={editing?'Editar':'Nova Aplicação'} size="lg">
+      <OnlineHerbicideForm initial={editing} pastures={pastures} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
+    </Modal>
+  </OnlinePage>;
+}
+
+function OnlineHerbicideForm({initial,pastures,onSave,onCancel}){
+  const[f,setF]=useState({date:TODAY,pasture_id:'',product:'',dose:'',area_ha:'',observations:'',...initial});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  return <>
+    <FormRow>
+      <Field label="Data" required><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
+      <Field label="Pasto"><Select value={f.pasture_id||''} onChange={e=>s('pasture_id',e.target.value||null)}><option value="">—</option>{pastures.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select></Field>
+    </FormRow>
+    <FormRow>
+      <Field label="Produto" required><Input value={f.product||''} onChange={e=>s('product',e.target.value)}/></Field>
+      <Field label="Dose"><Input value={f.dose||''} onChange={e=>s('dose',e.target.value)} placeholder="Ex: 3 L/ha"/></Field>
+    </FormRow>
+    <Field label="Área aplicada (ha)"><Input type="number" step="0.01" value={f.area_ha||''} onChange={e=>s('area_ha',parseFloat(e.target.value)||null)}/></Field>
+    <Field label="Observações"><Textarea value={f.observations||''} onChange={e=>s('observations',e.target.value)}/></Field>
+    <FormActions onSave={()=>{if(!f.product)return alert('Produto obrigatório');onSave(f);}} onCancel={onCancel}/>
+  </>;
+}
+
+/* ─── SAL MINERAL ONLINE ─── */
+function OnlineMineral({user}){
+  const{data:items,loading,error,reload}=useSupaQuery('mineral_supplementations',{order:{column:'date',ascending:false}});
+  const{data:lots}=useSupaQuery('lots');
+  const{data:pastures}=useSupaQuery('pastures');
+  const[showForm,setShowForm]=useState(false);
+  const[editing,setEditing]=useState(null);
+
+  async function save(data){
+    try{
+      if(editing)await window.SupaDB.update('mineral_supplementations',editing.id,data);
+      else await window.SupaDB.insert('mineral_supplementations',data);
+      setShowForm(false);setEditing(null);reload();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+  async function del(id){
+    if(user.role!=='admin'){alert('Apenas admin pode apagar.');return;}
+    if(!confirm('Excluir?'))return;
+    try{await window.SupaDB.remove('mineral_supplementations',id);reload();}
+    catch(e){alert('Erro: '+e.message);}
+  }
+
+  return <OnlinePage title="Sal Mineral" subtitle={items.length+' registros'} icon="🧂" loading={loading} error={error}
+    action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
+    <Card>
+      {items.length===0?<EmptyState icon="🧂" text="Sem registros"/>:
+        items.map(m=>{
+          const lot=lots.find(l=>l.id===m.lot_id);
+          const past=pastures.find(p=>p.id===m.pasture_id);
+          return <ListItem key={m.id} onClick={()=>{setEditing(m);setShowForm(true);}}>
+            <div style={{display:'flex',justifyContent:'space-between'}}>
+              <div>
+                <strong style={{fontSize:13}}>{m.product||'Sal mineral'}</strong> — {m.quantity} {m.unit}
+                <p style={{fontSize:11,color:'#6b7280'}}>{lot?.name||past?.name||'—'} · {H.fmtDate(m.date)}</p>
+              </div>
+              {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(m.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
+            </div>
+          </ListItem>;
+        })
+      }
+    </Card>
+    <Modal open={showForm} onClose={()=>{setShowForm(false);setEditing(null);}} title={editing?'Editar':'Novo Registro'} size="lg">
+      <OnlineMineralForm initial={editing} lots={lots} pastures={pastures} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
+    </Modal>
+  </OnlinePage>;
+}
+
+function OnlineMineralForm({initial,lots,pastures,onSave,onCancel}){
+  const[f,setF]=useState({date:TODAY,product:'',quantity:'',unit:'kg',lot_id:'',pasture_id:'',observations:'',...initial});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  return <>
+    <FormRow>
+      <Field label="Data"><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
+      <Field label="Produto" required><Input value={f.product||''} onChange={e=>s('product',e.target.value)} placeholder="Ex: Sal mineral 80"/></Field>
+    </FormRow>
+    <FormRow>
+      <Field label="Quantidade" required><Input type="number" step="0.01" value={f.quantity||''} onChange={e=>s('quantity',parseFloat(e.target.value)||null)}/></Field>
+      <Field label="Unidade"><Select value={f.unit} onChange={e=>s('unit',e.target.value)}>{H.UNITS.map(u=><option key={u}>{u}</option>)}</Select></Field>
+    </FormRow>
+    <FormRow>
+      <Field label="Lote"><Select value={f.lot_id||''} onChange={e=>s('lot_id',e.target.value||null)}><option value="">—</option>{lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
+      <Field label="Pasto"><Select value={f.pasture_id||''} onChange={e=>s('pasture_id',e.target.value||null)}><option value="">—</option>{pastures.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select></Field>
+    </FormRow>
+    <Field label="Observações"><Textarea value={f.observations||''} onChange={e=>s('observations',e.target.value)}/></Field>
+    <FormActions onSave={()=>{if(!f.product||!f.quantity)return alert('Produto e quantidade obrigatórios');onSave(f);}} onCancel={onCancel}/>
+  </>;
+}
+
+/* ─── FEZES ONLINE ─── */
+function OnlineFeces({user}){
+  const{data:items,loading,error,reload}=useSupaQuery('feces_records',{order:{column:'date',ascending:false}});
+  const{data:lots}=useSupaQuery('lots');
+  const{data:pastures}=useSupaQuery('pastures');
+  const[showForm,setShowForm]=useState(false);
+  const[editing,setEditing]=useState(null);
+
+  async function save(data){
+    try{
+      if(editing)await window.SupaDB.update('feces_records',editing.id,data);
+      else await window.SupaDB.insert('feces_records',data);
+      setShowForm(false);setEditing(null);reload();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+  async function del(id){
+    if(user.role!=='admin'){alert('Apenas admin pode apagar.');return;}
+    if(!confirm('Excluir?'))return;
+    try{await window.SupaDB.remove('feces_records',id);reload();}
+    catch(e){alert('Erro: '+e.message);}
+  }
+
+  return <OnlinePage title="Análise de Fezes" subtitle={items.length+' registros'} icon="🔍" loading={loading} error={error}
+    action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
+    <Card>
+      {items.length===0?<EmptyState icon="🔍" text="Sem análises"/>:
+        items.map(f=>{
+          const lot=lots.find(l=>l.id===f.lot_id);
+          return <ListItem key={f.id} onClick={()=>{setEditing(f);setShowForm(true);}}>
+            <div style={{display:'flex',justifyContent:'space-between'}}>
+              <div>
+                <strong style={{fontSize:13}}>{f.parasites_found?'⚠ '+f.parasites_found:'Sem parasitas'}</strong>
+                <p style={{fontSize:11,color:'#6b7280'}}>{lot?.name||'—'} · {H.fmtDate(f.date)} · OPG: {f.opg||'—'}</p>
+              </div>
+              {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(f.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
+            </div>
+          </ListItem>;
+        })
+      }
+    </Card>
+    <Modal open={showForm} onClose={()=>{setShowForm(false);setEditing(null);}} title={editing?'Editar':'Nova Análise'} size="lg">
+      <OnlineFecesForm initial={editing} lots={lots} pastures={pastures} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
+    </Modal>
+  </OnlinePage>;
+}
+
+function OnlineFecesForm({initial,lots,pastures,onSave,onCancel}){
+  const[f,setF]=useState({date:TODAY,lot_id:'',pasture_id:'',opg:'',parasites_found:'',recommendation:'',observations:'',...initial});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  return <>
+    <FormRow>
+      <Field label="Data" required><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
+      <Field label="OPG (ovos/grama)"><Input type="number" value={f.opg||''} onChange={e=>s('opg',parseInt(e.target.value)||null)}/></Field>
+    </FormRow>
+    <FormRow>
+      <Field label="Lote"><Select value={f.lot_id||''} onChange={e=>s('lot_id',e.target.value||null)}><option value="">—</option>{lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
+      <Field label="Pasto"><Select value={f.pasture_id||''} onChange={e=>s('pasture_id',e.target.value||null)}><option value="">—</option>{pastures.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select></Field>
+    </FormRow>
+    <Field label="Parasitas encontrados"><Input value={f.parasites_found||''} onChange={e=>s('parasites_found',e.target.value)} placeholder="Ex: Haemonchus, Trichostrongylus..."/></Field>
+    <Field label="Recomendação"><Textarea value={f.recommendation||''} onChange={e=>s('recommendation',e.target.value)}/></Field>
+    <Field label="Observações"><Textarea value={f.observations||''} onChange={e=>s('observations',e.target.value)}/></Field>
+    <FormActions onSave={()=>onSave(f)} onCancel={onCancel}/>
+  </>;
+}
+
+/* ─── BUSCA CONSOLIDADA ONLINE ─── */
+function OnlineSearch({user,onNav}){
+  const[q,setQ]=useState('');
+  const[result,setResult]=useState(null);
+  const[loading,setLoading]=useState(false);
+
+  async function doSearch(){
+    if(!q.trim()){setResult(null);return;}
+    setLoading(true);
+    try{
+      const term=q.trim();
+      const animal=await window.SupaDB.findBy('animals','identifier',term);
+      const[births,deaths,weighings,protocols,pregnancies,exits]=await Promise.all([
+        window.SUPA.client.from('births').select('*').or(`mother_id.ilike.%${term}%,calf_id.ilike.%${term}%,bull_name.ilike.%${term}%`).order('birth_date',{ascending:false}),
+        window.SUPA.client.from('deaths').select('*').ilike('animal_id',`%${term}%`).order('death_date',{ascending:false}),
+        window.SUPA.client.from('weighings').select('*').ilike('animal_id',`%${term}%`).order('date',{ascending:false}),
+        window.SUPA.client.from('reproductive_protocols').select('*').ilike('cow_id',`%${term}%`).order('date',{ascending:false}),
+        window.SUPA.client.from('pregnancy_diagnoses').select('*').ilike('cow_id',`%${term}%`).order('diagnosis_date',{ascending:false}),
+        window.SUPA.client.from('animal_exits').select('*').ilike('identifier',`%${term}%`).order('date',{ascending:false}),
+      ]);
+      setResult({animal,births:births.data||[],deaths:deaths.data||[],weighings:weighings.data||[],protocols:protocols.data||[],pregnancies:pregnancies.data||[],exits:exits.data||[]});
+    }catch(e){alert('Erro: '+e.message);}
+    finally{setLoading(false);}
+  }
+
+  return <OnlinePage title="Busca Consolidada" subtitle="Histórico do animal" icon="🔍">
+    <Card style={{marginBottom:12,padding:12}}>
+      <p style={{fontSize:12,color:'#6b7280',marginBottom:8}}>Busque por brinco/identificador. Verá nascimentos, pesagens, mortes, reprodução e gestações relacionadas.</p>
+      <div style={{display:'flex',gap:8}}>
+        <Input value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')doSearch();}} placeholder="Digite o brinco do animal..." style={{flex:1}}/>
+        <Btn onClick={doSearch}>🔎 Buscar</Btn>
+      </div>
+    </Card>
+
+    {loading&&<div style={{textAlign:'center',padding:24}}>⏳ Buscando...</div>}
+
+    {result&&<>
+      {result.animal?
+        <Card style={{marginBottom:12}}>
+          <CardHeader title={'Animal: '+result.animal.identifier} icon="🐂"/>
+          <div style={{padding:12,display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,fontSize:12}}>
+            <Info label="Tipo" value={result.animal.type}/>
+            <Info label="Sexo" value={result.animal.sex}/>
+            <Info label="Raça" value={result.animal.race}/>
+            <Info label="Status" value={result.animal.status}/>
+            <Info label="Nasc." value={H.fmtDate(result.animal.birth_date)}/>
+            <Info label="Brinco Faz." value={result.animal.farm_tag||'—'}/>
+          </div>
+        </Card>
+      :
+        <Alert type="warning">⚠ Animal não encontrado no Inventário, mas pode ter eventos relacionados abaixo.</Alert>
+      }
+
+      {result.births.length>0&&<Card style={{marginBottom:8}}>
+        <CardHeader title="🐮 Nascimentos relacionados" action={<Badge color="blue">{result.births.length}</Badge>}/>
+        {result.births.map(b=><ListItem key={b.id}>
+          <strong style={{fontSize:13}}>{b.calf_id}</strong> de {b.mother_id}
+          <p style={{fontSize:11,color:'#6b7280'}}>{H.fmtDate(b.birth_date)} · {b.birth_weight}kg</p>
+        </ListItem>)}
+      </Card>}
+
+      {result.weighings.length>0&&<Card style={{marginBottom:8}}>
+        <CardHeader title="⚖️ Pesagens" action={<Badge color="amber">{result.weighings.length}</Badge>}/>
+        {result.weighings.map(w=><ListItem key={w.id}>
+          <strong style={{fontSize:13}}>{w.weight} kg</strong> — {H.fmtDate(w.date)}
+          <p style={{fontSize:11,color:'#6b7280'}}>{w.category}</p>
+        </ListItem>)}
+      </Card>}
+
+      {result.protocols.length>0&&<Card style={{marginBottom:8}}>
+        <CardHeader title="🔬 Reprodução" action={<Badge color="purple">{result.protocols.length}</Badge>}/>
+        {result.protocols.map(p=><ListItem key={p.id}>
+          <strong style={{fontSize:13}}>{p.protocol_name}</strong> — {p.semen_bull||'—'}
+          <p style={{fontSize:11,color:'#6b7280'}}>{H.fmtDate(p.date)}</p>
+        </ListItem>)}
+      </Card>}
+
+      {result.pregnancies.length>0&&<Card style={{marginBottom:8}}>
+        <CardHeader title="🤰 Gestação" action={<Badge color="purple">{result.pregnancies.length}</Badge>}/>
+        {result.pregnancies.map(p=><ListItem key={p.id}>
+          <Badge color={p.result==='Positivo'?'green':'red'}>{p.result}</Badge> {H.fmtDate(p.diagnosis_date)}
+          {p.expected_birth_date&&<p style={{fontSize:11,color:'#6b7280'}}>Parto previsto: {H.fmtDate(p.expected_birth_date)}</p>}
+        </ListItem>)}
+      </Card>}
+
+      {result.deaths.length>0&&<Card style={{marginBottom:8}}>
+        <CardHeader title="✝ Mortes" action={<Badge color="red">{result.deaths.length}</Badge>}/>
+        {result.deaths.map(d=><ListItem key={d.id}>
+          <strong style={{fontSize:13}}>{d.cause}</strong>
+          <p style={{fontSize:11,color:'#6b7280'}}>{H.fmtDate(d.death_date)}</p>
+        </ListItem>)}
+      </Card>}
+
+      {result.exits.length>0&&<Card style={{marginBottom:8}}>
+        <CardHeader title="📤 Saídas" action={<Badge color="gray">{result.exits.length}</Badge>}/>
+        {result.exits.map(x=><ListItem key={x.id}>
+          <Badge color="gray">{x.reason}</Badge> {H.fmtDate(x.date)}
+          {x.sale_value&&<span style={{marginLeft:8,fontSize:11,color:'#166534'}}>{H.fmtMoney(x.sale_value)}</span>}
+        </ListItem>)}
+      </Card>}
+
+      {Object.values(result).filter(Array.isArray).every(arr=>arr.length===0)&&!result.animal&&
+        <EmptyState icon="🔍" text="Nada encontrado"/>}
+    </>}
+  </OnlinePage>;
+}
+
+/* ─── EXPORTAÇÃO CSV ONLINE ─── */
+function OnlineExport({user}){
+  const[exporting,setExporting]=useState(false);
+  const[lastExport,setLastExport]=useState(null);
+
+  async function exportTable(table,label){
+    setExporting(true);
+    try{
+      const data=await window.SupaDB.get(table);
+      if(!data||data.length===0){alert('Nenhum dado em '+label);setExporting(false);return;}
+      const headers=Object.keys(data[0]);
+      const csv=[
+        headers.join(','),
+        ...data.map(row=>headers.map(h=>{
+          const v=row[h];
+          if(v===null||v===undefined)return '';
+          const s=String(v).replace(/"/g,'""');
+          return s.includes(',')||s.includes('"')||s.includes('\n')?`"${s}"`:s;
+        }).join(','))
+      ].join('\n');
+      const bom='\uFEFF'; // UTF-8 BOM pra Excel reconhecer acentos
+      const blob=new Blob([bom+csv],{type:'text/csv;charset=utf-8;'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url;
+      a.download=`${table}-${TODAY}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setLastExport({table,label,count:data.length,when:new Date().toLocaleTimeString()});
+    }catch(e){alert('Erro: '+e.message);}
+    finally{setExporting(false);}
+  }
+
+  async function exportAll(){
+    if(!confirm('Exportar TODAS as tabelas em arquivos CSV separados?\n\nVai baixar vários arquivos.'))return;
+    const all=[
+      ['animals','Animais'],['pastures','Pastos'],['lots','Lotes'],
+      ['births','Nascimentos'],['deaths','Mortalidade'],['weighings','Pesagens'],
+      ['reproductive_protocols','Reprodução'],['pregnancy_diagnoses','Gestação'],
+      ['health_managements','Manejos'],['herbicide_applications','Herbicida'],
+      ['mineral_supplementations','Sal mineral'],['feces_records','Fezes'],
+      ['animal_exits','Saídas'],
+      ...(user.role==='admin'?[['revenues','Receitas'],['costs','Custos']]:[]),
+    ];
+    for(const[t,l]of all){await exportTable(t,l);await new Promise(r=>setTimeout(r,400));}
+    alert('✅ Exportação concluída!');
+  }
+
+  const tables=[
+    ['animals','📋 Animais','blue'],
+    ['pastures','🌿 Pastos','green'],
+    ['lots','🐂 Lotes','amber'],
+    ['births','🐮 Nascimentos','blue'],
+    ['deaths','✝ Mortalidade','red'],
+    ['weighings','⚖️ Pesagens','amber'],
+    ['reproductive_protocols','🔬 Reprodução','purple'],
+    ['pregnancy_diagnoses','🤰 Gestação','pink'],
+    ['health_managements','💉 Manejos sanitários','green'],
+    ['herbicide_applications','🌿 Herbicida','green'],
+    ['mineral_supplementations','🧂 Sal mineral','gray'],
+    ['feces_records','🔍 Fezes','amber'],
+    ['animal_exits','📤 Saídas','gray'],
+  ];
+  if(user.role==='admin'){
+    tables.push(['revenues','💰 Receitas','green']);
+    tables.push(['costs','💵 Custos','red']);
+  }
+
+  return <OnlinePage title="Exportar Dados" subtitle="Baixe planilhas CSV de cada tabela" icon="📥">
+    <Alert type="info">📊 Os arquivos CSV abrem perfeitamente no Excel, Google Sheets, LibreOffice etc.</Alert>
+
+    <Card style={{marginBottom:12}}>
+      <CardHeader title="Exportar tudo de uma vez" icon="📦"/>
+      <div style={{padding:12}}>
+        <Btn onClick={exportAll} fullWidth disabled={exporting}>
+          {exporting?'⏳ Exportando...':'📦 Baixar TODAS as planilhas'}
+        </Btn>
+      </div>
+    </Card>
+
+    {lastExport&&<Alert type="success">
+      ✅ Última exportação: <strong>{lastExport.label}</strong> ({lastExport.count} registros) às {lastExport.when}
+    </Alert>}
+
+    <Card>
+      <CardHeader title="Exportar tabela individual" icon="📄"/>
+      {tables.map(([t,l,c])=>
+        <ListItem key={t}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <span style={{fontSize:13}}>{l}</span>
+            <Btn size="sm" variant="secondary" onClick={()=>exportTable(t,l)} disabled={exporting}>📥 Baixar</Btn>
+          </div>
+        </ListItem>
+      )}
+    </Card>
+  </OnlinePage>;
+}
+
+/* ─── ANÁLISES ONLINE (admin only) ─── */
+function OnlineAnalysis({user}){
+  if(user.role!=='admin')return <div style={{padding:32,textAlign:'center'}}><div style={{fontSize:48}}>🔒</div><p style={{color:'#6b7280',marginTop:12}}>Acesso restrito</p></div>;
+  const{data:revenues,loading:lR}=useSupaQuery('revenues');
+  const{data:costs,loading:lC}=useSupaQuery('costs');
+  const{data:births,loading:lB}=useSupaQuery('births');
+  const{data:animals,loading:lA}=useSupaQuery('animals');
+  const{data:pregnancies,loading:lP}=useSupaQuery('pregnancy_diagnoses');
+  const loading=lR||lC||lB||lA||lP;
+
+  const totalRevenue=revenues.reduce((s,r)=>s+(parseFloat(r.total_value)||0),0);
+  const totalCost=costs.reduce((s,c)=>s+(parseFloat(c.value)||0),0);
+  const profit=totalRevenue-totalCost;
+  const calfBornCount=births.length;
+  const costPerCalf=calfBornCount>0?totalCost/calfBornCount:0;
+  const revenuePerCalf=calfBornCount>0?totalRevenue/calfBornCount:0;
+  const activeFemales=animals.filter(a=>a.sex==='Fêmea'&&(a.status||'ativo')==='ativo'&&['Vaca','Novilha'].includes(a.type)).length;
+  const positivePregnancies=pregnancies.filter(p=>p.result==='Positivo').length;
+  const totalPregnancies=pregnancies.length;
+  const pregnancyRate=totalPregnancies>0?(positivePregnancies/totalPregnancies)*100:0;
+
+  // Custos por categoria
+  const costsByCat={};
+  costs.forEach(c=>{
+    const cat=c.category||'Outros';
+    costsByCat[cat]=(costsByCat[cat]||0)+(parseFloat(c.value)||0);
+  });
+
+  return <OnlinePage title="Análises" subtitle="Resumo financeiro e produtivo" icon="📊" loading={loading}>
+    <Alert type="info">📈 Análises calculadas com base em todos os dados cadastrados.</Alert>
+
+    <Card style={{marginBottom:12}}>
+      <CardHeader title="💰 Resumo Financeiro" icon=""/>
+      <div style={{padding:12,display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+        <StatCard label="Receitas" value={H.fmtMoney(totalRevenue)} color="green"/>
+        <StatCard label="Custos" value={H.fmtMoney(totalCost)} color="red"/>
+        <StatCard label={profit>=0?'Lucro':'Prejuízo'} value={H.fmtMoney(profit)} color={profit>=0?'green':'red'}/>
+        <StatCard label="Margem" value={totalRevenue>0?((profit/totalRevenue)*100).toFixed(1)+'%':'—'} color={profit>=0?'green':'red'}/>
+      </div>
+    </Card>
+
+    <Card style={{marginBottom:12}}>
+      <CardHeader title="🐮 Custo / Receita por Bezerro" icon=""/>
+      <div style={{padding:12}}>
+        <p style={{fontSize:11,color:'#6b7280',marginBottom:8}}>Baseado em {calfBornCount} nascimentos cadastrados</p>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+          <StatCard label="Custo / Bezerro" value={H.fmtMoney(costPerCalf)} color="red"/>
+          <StatCard label="Receita / Bezerro" value={H.fmtMoney(revenuePerCalf)} color="green"/>
+        </div>
+      </div>
+    </Card>
+
+    <Card style={{marginBottom:12}}>
+      <CardHeader title="🤰 Reprodução" icon=""/>
+      <div style={{padding:12,display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+        <StatCard label="Fêmeas reprodutivas" value={activeFemales} color="blue"/>
+        <StatCard label="Taxa de Prenhez" value={pregnancyRate.toFixed(0)+'%'} sub={positivePregnancies+'/'+totalPregnancies} color="amber"/>
+      </div>
+    </Card>
+
+    {Object.keys(costsByCat).length>0&&<Card style={{marginBottom:12}}>
+      <CardHeader title="💵 Custos por Categoria" icon=""/>
+      <div style={{padding:12}}>
+        {Object.entries(costsByCat).sort((a,b)=>b[1]-a[1]).map(([cat,val])=>{
+          const pct=totalCost>0?(val/totalCost)*100:0;
+          return <div key={cat} style={{marginBottom:10}}>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:4}}>
+              <strong>{cat}</strong>
+              <span>{H.fmtMoney(val)} ({pct.toFixed(1)}%)</span>
+            </div>
+            <div style={{height:8,background:'#f3f4f6',borderRadius:4,overflow:'hidden'}}>
+              <div style={{height:'100%',width:pct+'%',background:'#dc2626'}}/>
+            </div>
+          </div>;
+        })}
+      </div>
+    </Card>}
+  </OnlinePage>;
+}
+
+/* ─── RELATÓRIO DE SAFRA ONLINE ─── */
+function OnlineSafraReport({user}){
+  if(user.role!=='admin')return <div style={{padding:32,textAlign:'center'}}><div style={{fontSize:48}}>🔒</div><p style={{color:'#6b7280',marginTop:12}}>Acesso restrito</p></div>;
+  const{data:animals,loading:lA}=useSupaQuery('animals');
+  const{data:births,loading:lB}=useSupaQuery('births');
+  const{data:deaths,loading:lD}=useSupaQuery('deaths');
+  const{data:exits,loading:lE}=useSupaQuery('animal_exits');
+  const{data:pregnancies,loading:lP}=useSupaQuery('pregnancy_diagnoses');
+  const{data:revenues,loading:lR}=useSupaQuery('revenues');
+  const{data:costs,loading:lC}=useSupaQuery('costs');
+  const{data:lots}=useSupaQuery('lots');
+  const{data:pastures}=useSupaQuery('pastures');
+  const loading=lA||lB||lD||lE||lP||lR||lC;
+
+  const[year,setYear]=useState(new Date().getFullYear());
+
+  function inYear(dateStr){
+    if(!dateStr)return false;
+    return String(dateStr).startsWith(String(year));
+  }
+
+  const yearBirths=births.filter(b=>inYear(b.birth_date));
+  const yearDeaths=deaths.filter(d=>inYear(d.death_date));
+  const yearExits=exits.filter(x=>inYear(x.date));
+  const yearPregs=pregnancies.filter(p=>inYear(p.diagnosis_date));
+  const yearRevenues=revenues.filter(r=>inYear(r.date));
+  const yearCosts=costs.filter(c=>inYear(c.date));
+
+  const totalRev=yearRevenues.reduce((s,r)=>s+(parseFloat(r.total_value)||0),0);
+  const totalCost=yearCosts.reduce((s,c)=>s+(parseFloat(c.value)||0),0);
+  const totalArea=pastures.reduce((s,p)=>s+(parseFloat(p.area_ha)||0),0);
+  const activeAnimals=animals.filter(a=>(a.status||'ativo')==='ativo').length;
+  const positivePregs=yearPregs.filter(p=>p.result==='Positivo').length;
+  const pregRate=yearPregs.length>0?(positivePregs/yearPregs.length)*100:0;
+  const mortalityRate=activeAnimals>0?(yearDeaths.length/activeAnimals)*100:0;
+
+  function doPrint(){window.print();}
+
+  return <OnlinePage title="Relatório de Safra" subtitle="Imprimível / PDF" icon="📑"
+    action={<Btn onClick={doPrint}>🖨 Imprimir</Btn>} loading={loading}>
+    <Card style={{marginBottom:12,padding:12}} className="no-print">
+      <Field label="Ano da Safra"><Select value={year} onChange={e=>setYear(parseInt(e.target.value))}>
+        {[year+1,year,year-1,year-2,year-3,year-4].map(y=><option key={y} value={y}>{y}</option>)}
+      </Select></Field>
+    </Card>
+
+    <div id="safra-print" style={{background:'#fff',padding:'24px',borderRadius:12,fontSize:12,lineHeight:1.5}}>
+      <div style={{textAlign:'center',marginBottom:20,borderBottom:'2px solid #166534',paddingBottom:10}}>
+        <h1 style={{fontSize:22,color:'#166534',marginBottom:4}}>📑 RELATÓRIO DE SAFRA {year}</h1>
+        <p style={{fontSize:12,color:'#6b7280'}}>Gerado em {new Date().toLocaleDateString('pt-BR')}</p>
+      </div>
+
+      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>📋 PROPRIEDADE</h2>
+      <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
+        <tbody>
+          <tr><td style={{padding:'4px 0'}}><strong>Animais ativos:</strong></td><td style={{textAlign:'right'}}>{activeAnimals}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Total de pastos:</strong></td><td style={{textAlign:'right'}}>{pastures.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Área total:</strong></td><td style={{textAlign:'right'}}>{totalArea.toFixed(2)} ha</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Total de lotes:</strong></td><td style={{textAlign:'right'}}>{lots.length}</td></tr>
+        </tbody>
+      </table>
+
+      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>🐮 PRODUÇÃO {year}</h2>
+      <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
+        <tbody>
+          <tr><td style={{padding:'4px 0'}}><strong>Nascimentos:</strong></td><td style={{textAlign:'right'}}>{yearBirths.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Mortes:</strong></td><td style={{textAlign:'right'}}>{yearDeaths.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Saídas (vendas/etc):</strong></td><td style={{textAlign:'right'}}>{yearExits.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Taxa de mortalidade:</strong></td><td style={{textAlign:'right'}}>{mortalityRate.toFixed(2)}%</td></tr>
+        </tbody>
+      </table>
+
+      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>🤰 REPRODUÇÃO {year}</h2>
+      <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
+        <tbody>
+          <tr><td style={{padding:'4px 0'}}><strong>Diagnósticos no ano:</strong></td><td style={{textAlign:'right'}}>{yearPregs.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Positivos:</strong></td><td style={{textAlign:'right'}}>{positivePregs}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Taxa de prenhez:</strong></td><td style={{textAlign:'right'}}>{pregRate.toFixed(1)}%</td></tr>
+        </tbody>
+      </table>
+
+      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>💰 FINANCEIRO {year}</h2>
+      <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
+        <tbody>
+          <tr><td style={{padding:'4px 0'}}><strong>Receitas:</strong></td><td style={{textAlign:'right',color:'#166534'}}>{H.fmtMoney(totalRev)}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Custos:</strong></td><td style={{textAlign:'right',color:'#dc2626'}}>{H.fmtMoney(totalCost)}</td></tr>
+          <tr style={{borderTop:'1px solid #e5e7eb'}}><td style={{padding:'8px 0 4px'}}><strong>{(totalRev-totalCost)>=0?'LUCRO':'PREJUÍZO'}:</strong></td><td style={{textAlign:'right',padding:'8px 0 4px',fontSize:14,fontWeight:700,color:(totalRev-totalCost)>=0?'#166534':'#dc2626'}}>{H.fmtMoney(totalRev-totalCost)}</td></tr>
+        </tbody>
+      </table>
+
+      {yearBirths.length>0&&<>
+        <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>🐮 LISTA DE NASCIMENTOS {year}</h2>
+        <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
+          <thead>
+            <tr style={{background:'#f3f4f6'}}>
+              <th style={{padding:6,textAlign:'left',border:'1px solid #e5e7eb'}}>Bezerro</th>
+              <th style={{padding:6,textAlign:'left',border:'1px solid #e5e7eb'}}>Mãe</th>
+              <th style={{padding:6,textAlign:'center',border:'1px solid #e5e7eb'}}>Sexo</th>
+              <th style={{padding:6,textAlign:'right',border:'1px solid #e5e7eb'}}>Peso</th>
+              <th style={{padding:6,textAlign:'center',border:'1px solid #e5e7eb'}}>Data</th>
+            </tr>
+          </thead>
+          <tbody>
+            {yearBirths.map(b=><tr key={b.id}>
+              <td style={{padding:6,border:'1px solid #e5e7eb'}}>{b.calf_id}</td>
+              <td style={{padding:6,border:'1px solid #e5e7eb'}}>{b.mother_id}</td>
+              <td style={{padding:6,border:'1px solid #e5e7eb',textAlign:'center'}}>{b.calf_sex}</td>
+              <td style={{padding:6,border:'1px solid #e5e7eb',textAlign:'right'}}>{b.birth_weight} kg</td>
+              <td style={{padding:6,border:'1px solid #e5e7eb',textAlign:'center'}}>{H.fmtDate(b.birth_date)}</td>
+            </tr>)}
+          </tbody>
+        </table>
+      </>}
+    </div>
+
+    <style>{`
+      @media print {
+        .no-print, .pm-sidebar, .pm-topbar, .pm-bottomnav, button { display: none !important; }
+        body, html { background: #fff !important; }
+        #safra-print { box-shadow: none !important; padding: 0 !important; }
+      }
+    `}</style>
+  </OnlinePage>;
+}
+
+
 
 function App(){
   const[user,setUser]=useState(null);
@@ -6468,6 +7163,7 @@ function App(){
     const onlineProps={user:onlineUser,onNav:handleOnlineNav};
     const ONLINE_PAGES={
       'online-dashboard':<OnlineDashboard {...onlineProps}/>,
+      'online-search':<OnlineSearch {...onlineProps}/>,
       'online-inventory':<OnlineInventory {...onlineProps}/>,
       'online-pastures':<OnlinePastures {...onlineProps}/>,
       'online-lots':<OnlineLots {...onlineProps}/>,
@@ -6476,9 +7172,16 @@ function App(){
       'online-weighings':<OnlineWeighings {...onlineProps}/>,
       'online-reproductive':<OnlineReproductive {...onlineProps}/>,
       'online-pregnancy':<OnlinePregnancy {...onlineProps}/>,
+      'online-health':<OnlineHealthManagements {...onlineProps}/>,
+      'online-herbicide':<OnlineHerbicide {...onlineProps}/>,
+      'online-mineral':<OnlineMineral {...onlineProps}/>,
+      'online-feces':<OnlineFeces {...onlineProps}/>,
       'online-exits':<OnlineExits {...onlineProps}/>,
       'online-revenues':<OnlineRevenues {...onlineProps}/>,
       'online-costs':<OnlineCosts {...onlineProps}/>,
+      'online-analysis':<OnlineAnalysis {...onlineProps}/>,
+      'online-safra':<OnlineSafraReport {...onlineProps}/>,
+      'online-export':<OnlineExport {...onlineProps}/>,
       'online-collaborators':<OnlineCollaborators {...onlineProps}/>,
       'online-settings':<OnlineSettings {...onlineProps} onLogout={handleOnlineLogout}/>,
     };
