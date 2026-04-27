@@ -7821,6 +7821,8 @@ function OnlinePhotoImport({user}){
 }
 
 
+/* ─── IMPORTAÇÃO POR EXCEL ─── */
+function OnlineExcelImport({user}){
   if(user.role!=='admin')return <div style={{padding:32,textAlign:'center'}}><div style={{fontSize:48}}>🔒</div><p style={{color:'#6b7280',marginTop:12}}>Acesso restrito</p></div>;
   const{data:animals}=useSupaQuery('animals');
   const{data:lots}=useSupaQuery('lots');
