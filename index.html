@@ -16,6 +16,7 @@
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -458,9 +459,55 @@ window.SupaDB={
   },
 
   // Migração: empurrar dados do JSON local pro Supabase
-  async migrateFromLocal(localData,onProgress){
+  /* Apaga TODOS os dados de TODAS as tabelas operacionais (admin only).
+     Útil pra resetar e refazer importação. NÃO toca em profiles/auth. */
+  async wipeAll(onProgress){
+    if(!window.SUPA||!window.SUPA.currentProfile||window.SUPA.currentProfile.role!=='admin'){
+      throw new Error('Apenas admin pode limpar dados.');
+    }
+    // Ordem de delete respeitando dependências (filhos primeiro)
+    const TABLES=[
+      ['animal_exits','Saídas de animais'],
+      ['animal_lot_history','Histórico de lotes'],
+      ['births','Nascimentos'],
+      ['deaths','Mortalidade'],
+      ['weighings','Pesagens'],
+      ['pregnancy_diagnoses','Gestação'],
+      ['reproductive_protocols','Reprodução'],
+      ['health_managements','Manejos sanitários'],
+      ['herbicide_applications','Herbicida'],
+      ['mineral_supplementations','Sal mineral'],
+      ['feces_records','Fezes'],
+      ['pasture_movements','Movimentações de pastos'],
+      ['revenues','Receitas'],
+      ['costs','Custos'],
+      ['animals','Animais'],
+      ['lots','Lotes'],
+      ['pastures','Pastos'],
+    ];
+    const result={success:[],errors:[]};
+    for(const[table,label]of TABLES){
+      try{
+        // Delete tudo da tabela. Usar filtro inofensivo pra evitar erro
+        const{error}=await _sup().from(table).delete().not('id','is',null);
+        if(error)throw error;
+        result.success.push({table,label});
+        if(onProgress)onProgress({table,label});
+      }catch(e){
+        result.errors.push({table,label,error:e.message||String(e)});
+      }
+    }
+    return result;
+  },
+
+  async migrateFromLocal(localData,onProgress,opts={}){
     if(!window.SUPA||!window.SUPA.currentProfile||window.SUPA.currentProfile.role!=='admin'){
       throw new Error('Apenas admin pode migrar dados.');
+    }
+    // Se opts.replace = true, apaga tudo antes de importar (substitui)
+    if(opts.replace){
+      if(onProgress)onProgress({table:'__wipe__',label:'🗑 Limpando dados antigos...',count:0});
+      await window.SupaDB.wipeAll(()=>{});
     }
     // Mapeamento de IDs antigos → novos UUIDs gerados pelo Supabase
     const idMap={
@@ -4917,17 +4964,21 @@ function ConnectionBadge(){
 
 /* ─── Tela de Migração: subir dados do localStorage para Supabase ─── */
 function MigrationTool({onDone}){
-  const[stage,setStage]=useState('idle'); // idle | running | done
+  const[stage,setStage]=useState('idle'); // idle | running | done | wiping
   const[progress,setProgress]=useState([]);
   const[errors,setErrors]=useState([]);
   const[result,setResult]=useState(null);
+  const[mode,setMode]=useState('replace'); // 'replace' | 'append'
   const fileRef=useRef();
 
   async function startFromLocalStorage(){
-    if(!confirm('🚀 Iniciar migração do localStorage?\n\nIsso vai SUBIR todos os dados deste navegador (modo Local) para o Supabase.\n\nProsseguir?'))return;
+    const msg=mode==='replace'
+      ? '⚠ ATENÇÃO: Modo SUBSTITUIR\n\nIsso vai:\n1. APAGAR todos os dados atuais no Supabase\n2. Subir TUDO do localStorage do navegador\n\nUse essa opção pra evitar duplicatas. Prosseguir?'
+      : '🚀 Modo ACRESCENTAR\n\nIsso vai SOMAR os dados do localStorage aos dados existentes no Supabase. Pode criar duplicatas.\n\nProsseguir?';
+    if(!confirm(msg))return;
     const raw=localStorage.getItem('pm_data_v1');
-    if(!raw){alert('Nenhum dado local encontrado neste navegador.\n\nUse a opção "Carregar arquivo de backup" se você tem um arquivo JSON salvo de outro dispositivo.');return;}
-    await runMigration(JSON.parse(raw),'localStorage');
+    if(!raw){alert('Nenhum dado local encontrado neste navegador.\n\nUse a opção "Carregar arquivo de backup".');return;}
+    await runMigration(JSON.parse(raw));
   }
 
   async function handleFileUpload(e){
@@ -4937,7 +4988,6 @@ function MigrationTool({onDone}){
     reader.onload=async(ev)=>{
       try{
         const parsed=JSON.parse(ev.target.result);
-        // Aceita 2 formatos: backup completo (_pm_backup) ou dados diretos
         const data=parsed.data||parsed;
         if(!data||(!Array.isArray(data.animals)&&!Array.isArray(data.births)&&!Array.isArray(data.pastures))){
           alert('Arquivo não parece ser um backup válido do PecuáriaManager.');
@@ -4949,12 +4999,17 @@ function MigrationTool({onDone}){
           Pastos:(data.pastures||[]).length,
           Lotes:(data.lots||[]).length,
           Pesagens:(data.weighings||[]).length,
+          Reprodução:(data.reproductive_protocols||[]).length,
+          Gestação:(data.pregnancy_diagnoses||[]).length,
           Custos:(data.costs||[]).length,
           Receitas:(data.revenues||[]).length,
         };
-        const summary=Object.entries(counts).filter(([,v])=>v>0).map(([k,v])=>`${k}: ${v}`).join('\n');
-        if(!confirm(`Arquivo lido com sucesso!\n\nConteúdo encontrado:\n${summary}\n\nProsseguir com a migração para o Supabase?`))return;
-        await runMigration(data,'arquivo');
+        const summary=Object.entries(counts).filter(([,v])=>v>0).map(([k,v])=>`  ${k}: ${v}`).join('\n');
+        const modeMsg=mode==='replace'
+          ? '⚠ MODO SUBSTITUIR — Os dados atuais no Supabase serão APAGADOS antes da importação.'
+          : '➕ MODO ACRESCENTAR — Pode gerar duplicatas se já houver dados.';
+        if(!confirm(`Arquivo lido com sucesso!\n\nConteúdo:\n${summary}\n\n${modeMsg}\n\nProsseguir?`))return;
+        await runMigration(data);
       }catch(err){
         alert('Erro ao ler arquivo: '+err.message);
       }
@@ -4963,12 +5018,12 @@ function MigrationTool({onDone}){
     e.target.value='';
   }
 
-  async function runMigration(data,source){
+  async function runMigration(data){
     setStage('running');setProgress([]);setErrors([]);
     try{
       const r=await window.SupaDB.migrateFromLocal(data,(p)=>{
         setProgress(prev=>[...prev,p]);
-      });
+      },{replace:mode==='replace'});
       setResult(r);setStage('done');
       if(onDone)onDone(r);
     }catch(e){
@@ -4977,48 +5032,90 @@ function MigrationTool({onDone}){
     }
   }
 
+  async function doReset(){
+    const c1=confirm('🚨 ATENÇÃO MÁXIMA — RESETAR TUDO\n\nIsso vai APAGAR PERMANENTEMENTE:\n• Todos os animais\n• Todos os pastos\n• Todos os lotes\n• Todos os nascimentos, mortes, pesagens\n• Toda a reprodução, gestação\n• Todos os manejos\n• Todas as receitas e custos\n\nApenas usuários e configurações ficam.\n\nTem CERTEZA ABSOLUTA?');
+    if(!c1)return;
+    const c2=prompt('Digite CONFIRMAR (em maiúsculas) pra prosseguir:');
+    if(c2!=='CONFIRMAR'){alert('Cancelado. Você precisa digitar exatamente CONFIRMAR.');return;}
+    setStage('wiping');setProgress([]);setErrors([]);
+    try{
+      const r=await window.SupaDB.wipeAll((p)=>{
+        setProgress(prev=>[...prev,{...p,count:'apagado'}]);
+      });
+      setResult({success:r.success.map(s=>({...s,count:0,wiped:true})),errors:r.errors});
+      setStage('done');
+    }catch(e){
+      setErrors([{label:'Geral',error:e.message||String(e)}]);
+      setStage('done');
+    }
+  }
+
   return <Card style={{marginBottom:16}}>
-    <CardHeader title="Migrar dados para o Supabase" icon="🚀"/>
+    <CardHeader title="Importar / Resetar Dados" icon="🔄"/>
     <div style={{padding:16}}>
       {stage==='idle'&&<>
         <Alert type="info">
-          Esta ferramenta sobe TODOS os dados do PecuáriaManager para o Supabase (nuvem).
-          <br/><br/>
-          <strong>Você tem 2 opções:</strong>
+          <strong>Importar backup:</strong> sobe os dados de um arquivo .json para o Supabase.
         </Alert>
 
-        <div style={{display:'grid',gap:12,marginBottom:12}}>
+        {/* Toggle modo: substituir ou acrescentar */}
+        <div style={{display:'flex',gap:4,marginBottom:14,background:'#f3f4f6',padding:4,borderRadius:10}}>
+          <button onClick={()=>setMode('replace')}
+            style={{flex:1,padding:10,background:mode==='replace'?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:mode==='replace'?600:400,color:mode==='replace'?'#1e40af':'#6b7280'}}>
+            🔁 Substituir<br/><span style={{fontSize:10,fontWeight:400}}>(sem duplicatas)</span>
+          </button>
+          <button onClick={()=>setMode('append')}
+            style={{flex:1,padding:10,background:mode==='append'?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:mode==='append'?600:400,color:mode==='append'?'#92400e':'#6b7280'}}>
+            ➕ Acrescentar<br/><span style={{fontSize:10,fontWeight:400}}>(pode duplicar)</span>
+          </button>
+        </div>
+
+        {mode==='replace'&&<Alert type="warning">
+          <strong>Modo SUBSTITUIR ativo:</strong> os dados atuais no Supabase serão APAGADOS antes da importação. Recomendado pra evitar duplicatas.
+        </Alert>}
+
+        <div style={{display:'grid',gap:12,marginBottom:14,marginTop:12}}>
           <div style={{padding:14,background:'#f0fdf4',border:'1px solid #86efac',borderRadius:10}}>
-            <strong style={{fontSize:13,color:'#166534'}}>📂 Opção 1: Do arquivo de backup (.json)</strong>
+            <strong style={{fontSize:13,color:'#166534'}}>📂 Importar arquivo de backup (.json)</strong>
             <p style={{fontSize:12,color:'#374151',margin:'6px 0 10px'}}>
-              Use essa opção se você está em um navegador novo (ex: outro computador, ou o app online pela primeira vez)
-              e tem um arquivo de backup do PecuáriaManager salvo.
+              Recomendado se você tem um arquivo de backup salvo do app local.
             </p>
             <Btn onClick={()=>fileRef.current.click()} fullWidth>📂 Carregar arquivo de backup</Btn>
             <input ref={fileRef} type="file" accept=".json,application/json" style={{display:'none'}} onChange={handleFileUpload}/>
           </div>
 
           <div style={{padding:14,background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:10}}>
-            <strong style={{fontSize:13,color:'#1e3a8a'}}>💾 Opção 2: Do navegador atual</strong>
+            <strong style={{fontSize:13,color:'#1e3a8a'}}>💾 Migrar do navegador atual</strong>
             <p style={{fontSize:12,color:'#374151',margin:'6px 0 10px'}}>
-              Use essa opção apenas se você JÁ TEM dados salvos neste mesmo navegador (modo Local).
+              Use se você tem dados salvos neste navegador (modo Local).
             </p>
             <Btn variant="secondary" onClick={startFromLocalStorage} fullWidth>💾 Migrar do localStorage</Btn>
           </div>
         </div>
+
+        <div style={{borderTop:'2px solid #fee2e2',marginTop:18,paddingTop:18}}>
+          <div style={{padding:14,background:'#fef2f2',border:'1px solid #fca5a5',borderRadius:10}}>
+            <strong style={{fontSize:13,color:'#991b1b'}}>🚨 Resetar tudo (zona de perigo)</strong>
+            <p style={{fontSize:12,color:'#374151',margin:'6px 0 10px'}}>
+              APAGA todos os dados do Supabase. Útil pra começar do zero.
+              Usuários e configurações ficam.
+            </p>
+            <Btn variant="danger" onClick={doReset} fullWidth>🗑 Resetar todos os dados</Btn>
+          </div>
+        </div>
       </>}
-      {stage==='running'&&<>
-        <Alert type="warning">⏳ Migrando... NÃO feche essa janela.</Alert>
+      {(stage==='running'||stage==='wiping')&&<>
+        <Alert type="warning">⏳ {stage==='wiping'?'Limpando dados antigos...':'Importando...'} NÃO feche essa janela.</Alert>
         {progress.map((p,i)=><div key={i} style={{padding:'6px 12px',borderBottom:'1px solid #f3f4f6',fontSize:12,display:'flex',justifyContent:'space-between'}}>
-          <span>✅ {p.label}</span>
-          <strong>{p.count} reg.</strong>
+          <span>{p.table==='__wipe__'?'🗑':'✅'} {p.label}</span>
+          <strong>{p.count} {typeof p.count==='number'?'reg.':''}</strong>
         </div>)}
       </>}
       {stage==='done'&&<>
         {result&&result.success.length>0&&<Alert type="success">
-          <strong>✅ Migração concluída!</strong>
+          <strong>✅ {result.success[0]?.wiped?'Dados apagados!':'Concluído!'}</strong>
           <ul style={{margin:'6px 0 0 18px',fontSize:12}}>{result.success.map((s,i)=><li key={i}>
-            {s.label}: <strong>{s.count}</strong>
+            {s.label}{s.count!==undefined&&!s.wiped?': '+s.count:''}
             {s.skipped>0&&<span style={{color:'#92400e'}}> (⚠ {s.skipped} pulados)</span>}
             {s.errors>0&&<span style={{color:'#991b1b'}}> (❌ {s.errors} erros)</span>}
           </li>)}</ul>
@@ -5028,7 +5125,7 @@ function MigrationTool({onDone}){
           <ul style={{margin:'6px 0 0 18px',fontSize:12}}>{result.errors.map((s,i)=><li key={i}><strong>{s.label}:</strong> {s.error}</li>)}</ul>
         </Alert>}
         {errors.length>0&&errors.map((e,i)=><Alert key={i} type="error">{e.error}</Alert>)}
-        <Btn onClick={()=>setStage('idle')} variant="secondary" fullWidth>Voltar</Btn>
+        <Btn onClick={()=>{setStage('idle');setResult(null);setProgress([]);setErrors([]);}} variant="secondary" fullWidth>Voltar</Btn>
       </>}
     </div>
   </Card>;
@@ -5219,7 +5316,7 @@ function OnlineDashboard({user,onNav}){
       {user.role==='admin'&&<>
         <p style={{fontSize:11,fontWeight:600,color:'#6b7280',textTransform:'uppercase',marginBottom:10,marginTop:8}}>Análises e Relatórios</p>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-          {[['📊','Análises','online-analysis','#7c3aed'],['📑','Relatório de Safra','online-safra','#0c4a6e'],['📥','Exportar CSV','online-export','#059669'],['👥','Colaboradores','online-collaborators','#1e40af']].map(([i,l,p,c])=>
+          {[['📊','Análises','online-analysis','#7c3aed'],['📑','Relatório de Safra','online-safra','#0c4a6e'],['🖨','Fichas Imprim.','online-print','#0891b2'],['📊','Importar Excel','online-import','#15803d'],['📸','Importar por Foto','online-photo','#7e22ce'],['📥','Exportar CSV','online-export','#059669'],['👥','Colaboradores','online-collaborators','#1e40af']].map(([i,l,p,c])=>
             <button key={p} onClick={()=>onNav(p)} style={{padding:'14px 12px',background:c,color:'#fff',borderRadius:12,textAlign:'left',cursor:'pointer',border:'none'}}>
               <div style={{fontSize:22,marginBottom:4}}>{i}</div>
               <div style={{fontSize:11,fontWeight:600}}>{l}</div>
@@ -5253,6 +5350,9 @@ const ONLINE_NAV=[
   {id:'online-analysis',icon:'📊',label:'Análises',roles:['admin']},
   {id:'online-safra',icon:'📑',label:'Relatório Safra',roles:['admin']},
   {id:'online-export',icon:'📥',label:'Exportar CSV',roles:['admin']},
+  {id:'online-print',icon:'🖨',label:'Fichas Imprim.',roles:['admin','collaborator']},
+  {id:'online-import',icon:'📊',label:'Importar Excel',roles:['admin']},
+  {id:'online-photo',icon:'📸',label:'Importar por Foto',roles:['admin']},
   {id:'online-collaborators',icon:'👥',label:'Colaboradores',roles:['admin']},
   {id:'online-settings',icon:'⚙️',label:'Configurações',roles:['admin']},
 ];
@@ -6117,9 +6217,16 @@ function OnlineProtocolForm({initial,lots,onSave,onCancel}){
 /* ─── GESTAÇÃO ONLINE ─── */
 function OnlinePregnancy({user}){
   const{data:items,loading,error,reload}=useSupaQuery('pregnancy_diagnoses',{order:{column:'diagnosis_date',ascending:false}});
+  const{data:animals,loading:lA}=useSupaQuery('animals');
   const{data:lots}=useSupaQuery('lots');
+  const{data:protocols}=useSupaQuery('reproductive_protocols',{order:{column:'date',ascending:false}});
   const[showForm,setShowForm]=useState(false);
   const[editing,setEditing]=useState(null);
+  const[detailFemale,setDetailFemale]=useState(null);
+  const[viewMode,setViewMode]=useState('females'); // 'females' | 'history'
+  const[filterStatus,setFilterStatus]=useState('all'); // all | prenha | vazia | sem
+  const[filterLot,setFilterLot]=useState('');
+  const[query,setQuery]=useState('');
 
   async function save(data){
     try{
@@ -6134,40 +6241,224 @@ function OnlinePregnancy({user}){
     try{await window.SupaDB.remove('pregnancy_diagnoses',id);reload();}
     catch(e){alert('Erro: '+e.message);}
   }
-  const preg=H.calcPregnancy(items);
 
-  return <OnlinePage title="Gestação" subtitle={items.length+' diagnósticos'} icon="🤰" loading={loading} error={error}
-    action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
-    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:12}}>
-      <StatCard label="Taxa Prenhez" value={preg.rate.toFixed(0)+'%'} sub={preg.positive+'/'+preg.total} color="amber"/>
-      <StatCard label="Positivos" value={items.filter(i=>i.result==='Positivo').length} color="green"/>
-      <StatCard label="Negativos" value={items.filter(i=>i.result==='Negativo').length} color="red"/>
+  // Diagnóstico rápido: cria um registro de gestação direto
+  async function quickDiagnose(female,result){
+    try{
+      const protocol=protocols.find(p=>p.cow_id===female.identifier);
+      const data={
+        cow_id:female.identifier,
+        lot_id:female.lot_id,
+        diagnosis_date:TODAY,
+        result,
+        expected_birth_date:result==='Positivo'?H.addDays(TODAY,283):null,
+        notes:protocol?'Vinculado ao protocolo de '+H.fmtDate(protocol.date):'',
+      };
+      await window.SupaDB.insert('pregnancy_diagnoses',data);
+      reload();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+
+  // Para cada fêmea, encontrar o último diagnóstico e o último protocolo
+  const females=useMemo(()=>{
+    return animals
+      .filter(a=>a.sex==='Fêmea'&&['Vaca','Novilha'].includes(a.type)&&(a.status||'ativo')==='ativo')
+      .map(a=>{
+        const lastDiag=items.find(p=>p.cow_id===a.identifier);
+        const lastProtocol=protocols.find(p=>p.cow_id===a.identifier);
+        let status='sem'; // sem diagnóstico
+        if(lastDiag){
+          if(lastDiag.result==='Positivo')status='prenha';
+          else if(lastDiag.result==='Negativo')status='vazia';
+          else status='duvidoso';
+        }
+        return{...a,_lastDiag:lastDiag,_lastProtocol:lastProtocol,_status:status};
+      });
+  },[animals,items,protocols]);
+
+  const filteredFemales=useMemo(()=>{
+    return females.filter(f=>{
+      if(filterStatus!=='all'&&f._status!==filterStatus)return false;
+      if(filterLot&&f.lot_id!==filterLot)return false;
+      if(query&&!(f.identifier||'').toLowerCase().includes(query.toLowerCase()))return false;
+      return true;
+    }).sort((a,b)=>(a.identifier||'').localeCompare(b.identifier||'',undefined,{numeric:true,sensitivity:'base'}));
+  },[females,filterStatus,filterLot,query]);
+
+  // Estatísticas
+  const stats={
+    total:females.length,
+    prenha:females.filter(f=>f._status==='prenha').length,
+    vazia:females.filter(f=>f._status==='vazia').length,
+    sem:females.filter(f=>f._status==='sem').length,
+  };
+  const rate=stats.total>0?(stats.prenha/(stats.prenha+stats.vazia||1))*100:0;
+
+  return <OnlinePage title="Gestação" subtitle={stats.total+' fêmeas reprodutivas'} icon="🤰" loading={loading||lA} error={error}>
+
+    <div style={{display:'flex',gap:4,marginBottom:12,background:'#f3f4f6',padding:4,borderRadius:10}}>
+      <button onClick={()=>setViewMode('females')} style={{flex:1,padding:8,background:viewMode==='females'?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:viewMode==='females'?600:400,color:viewMode==='females'?'#1e40af':'#6b7280'}}>🐄 Fêmeas (status atual)</button>
+      <button onClick={()=>setViewMode('history')} style={{flex:1,padding:8,background:viewMode==='history'?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:viewMode==='history'?600:400,color:viewMode==='history'?'#1e40af':'#6b7280'}}>📜 Histórico ({items.length})</button>
     </div>
-    <Card>
-      {items.length===0?<EmptyState icon="🤰" text="Sem diagnósticos"/>:
-        items.map(p=><ListItem key={p.id} onClick={()=>{setEditing(p);setShowForm(true);}}>
-          <div style={{display:'flex',justifyContent:'space-between'}}>
-            <div>
-              <strong style={{fontSize:13}}>{p.cow_id}</strong> <Badge color={p.result==='Positivo'?'green':'red'}>{p.result}</Badge>
-              <p style={{fontSize:11,color:'#6b7280'}}>{H.fmtDate(p.diagnosis_date)}{p.expected_birth_date?' · Parto: '+H.fmtDate(p.expected_birth_date):''}</p>
-            </div>
-            {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(p.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
+
+    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:12}}>
+      <StatCard label="Prenhas" value={stats.prenha} color="green"/>
+      <StatCard label="Vazias" value={stats.vazia} color="red"/>
+      <StatCard label="Sem diag." value={stats.sem} color="gray"/>
+      <StatCard label="Taxa" value={rate.toFixed(0)+'%'} color="amber"/>
+    </div>
+
+    {viewMode==='females'?
+      <>
+        <Card style={{marginBottom:12,padding:12}}>
+          <Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar por brinco..." style={{marginBottom:8}}/>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            <Select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}>
+              <option value="all">Todos status ({stats.total})</option>
+              <option value="prenha">🟢 Prenhas ({stats.prenha})</option>
+              <option value="vazia">🔴 Vazias ({stats.vazia})</option>
+              <option value="sem">⚪ Sem diagnóstico ({stats.sem})</option>
+            </Select>
+            <Select value={filterLot} onChange={e=>setFilterLot(e.target.value)}>
+              <option value="">Todos os lotes</option>
+              {lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+            </Select>
           </div>
-        </ListItem>)
-      }
-    </Card>
+        </Card>
+
+        <Card>
+          {filteredFemales.length===0?<EmptyState icon="🐄" text={query||filterStatus!=='all'||filterLot?'Nenhuma fêmea bate':'Sem fêmeas reprodutivas no Inventário'}/>:
+            filteredFemales.map(f=>{
+              const lot=lots.find(l=>l.id===f.lot_id);
+              const statusInfo={
+                prenha:{color:'green',label:'🟢 Prenha',bg:'#f0fdf4'},
+                vazia:{color:'red',label:'🔴 Vazia',bg:'#fef2f2'},
+                sem:{color:'gray',label:'⚪ Sem diagnóstico',bg:'#fff'},
+                duvidoso:{color:'amber',label:'⚠ Duvidoso',bg:'#fffbeb'},
+              }[f._status]||{color:'gray',label:f._status,bg:'#fff'};
+              return <div key={f.id} style={{borderBottom:'1px solid #f3f4f6',padding:'10px 12px',background:statusInfo.bg}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:8,flexWrap:'wrap'}}>
+                  <div onClick={()=>setDetailFemale(f)} style={{flex:1,minWidth:140,cursor:'pointer'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                      <strong style={{fontSize:13}}>{f.identifier}</strong>
+                      <Badge color={statusInfo.color}>{statusInfo.label}</Badge>
+                      <Badge color="gray">{f.type}</Badge>
+                    </div>
+                    <p style={{fontSize:11,color:'#6b7280',marginTop:3}}>
+                      {f.race} · {lot?.name||'Sem lote'}
+                      {f._lastProtocol&&<span> · IATF: {H.fmtDate(f._lastProtocol.date)} ({f._lastProtocol.semen_bull||'—'})</span>}
+                    </p>
+                    {f._lastDiag&&<p style={{fontSize:11,color:'#6b7280'}}>
+                      Diagnóstico: {H.fmtDate(f._lastDiag.diagnosis_date)}
+                      {f._lastDiag.expected_birth_date&&' · Parto: '+H.fmtDate(f._lastDiag.expected_birth_date)}
+                    </p>}
+                  </div>
+                  <div style={{display:'flex',gap:6,flexShrink:0}}>
+                    <button onClick={()=>quickDiagnose(f,'Positivo')} title="Marcar prenha"
+                      style={{padding:'5px 10px',background:'#16a34a',color:'#fff',border:'none',borderRadius:6,cursor:'pointer',fontSize:11,fontWeight:600}}>🟢 Prenha</button>
+                    <button onClick={()=>quickDiagnose(f,'Negativo')} title="Marcar vazia"
+                      style={{padding:'5px 10px',background:'#dc2626',color:'#fff',border:'none',borderRadius:6,cursor:'pointer',fontSize:11,fontWeight:600}}>🔴 Vazia</button>
+                  </div>
+                </div>
+              </div>;
+            })
+          }
+        </Card>
+        <div style={{marginTop:12,display:'flex',justifyContent:'flex-end'}}>
+          <Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Diagnóstico detalhado</Btn>
+        </div>
+      </>
+    :
+      <Card>
+        {items.length===0?<EmptyState icon="🤰" text="Sem diagnósticos"/>:
+          items.map(p=><ListItem key={p.id} onClick={()=>{setEditing(p);setShowForm(true);}}>
+            <div style={{display:'flex',justifyContent:'space-between'}}>
+              <div>
+                <strong style={{fontSize:13}}>{p.cow_id}</strong> <Badge color={p.result==='Positivo'?'green':'red'}>{p.result}</Badge>
+                <p style={{fontSize:11,color:'#6b7280'}}>{H.fmtDate(p.diagnosis_date)}{p.expected_birth_date?' · Parto: '+H.fmtDate(p.expected_birth_date):''}</p>
+                {p.notes&&<p style={{fontSize:10,color:'#9ca3af',marginTop:2}}>{p.notes}</p>}
+              </div>
+              {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(p.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
+            </div>
+          </ListItem>)
+        }
+      </Card>
+    }
+
     <Modal open={showForm} onClose={()=>{setShowForm(false);setEditing(null);}} title={editing?'Editar':'Novo Diagnóstico'} size="lg">
-      <OnlinePregForm initial={editing} lots={lots} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
+      <OnlinePregForm initial={editing} lots={lots} protocols={protocols} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
+    </Modal>
+
+    <Modal open={!!detailFemale} onClose={()=>setDetailFemale(null)} title={detailFemale?detailFemale.identifier:''} size="lg">
+      {detailFemale&&<OnlineFemaleDetail female={detailFemale} items={items} protocols={protocols} lots={lots} onClose={()=>setDetailFemale(null)}/>}
     </Modal>
   </OnlinePage>;
 }
 
-function OnlinePregForm({initial,lots,onSave,onCancel}){
+function OnlineFemaleDetail({female,items,protocols,lots,onClose}){
+  const lot=lots.find(l=>l.id===female.lot_id);
+  const myDiags=items.filter(i=>i.cow_id===female.identifier).sort((a,b)=>(b.diagnosis_date||'').localeCompare(a.diagnosis_date||''));
+  const myProtocols=protocols.filter(p=>p.cow_id===female.identifier).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  return <>
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,fontSize:12,marginBottom:12}}>
+      <Info label="Tipo" value={female.type}/>
+      <Info label="Raça" value={female.race}/>
+      <Info label="Nascimento" value={H.fmtDate(female.birth_date)}/>
+      <Info label="Lote" value={lot?.name||'—'}/>
+    </div>
+
+    {myProtocols.length>0&&<Card style={{marginBottom:12}}>
+      <CardHeader title="🔬 Protocolos Reprodutivos" action={<Badge color="purple">{myProtocols.length}</Badge>}/>
+      {myProtocols.slice(0,5).map(p=>
+        <ListItem key={p.id}>
+          <strong style={{fontSize:12}}>{p.protocol_name||'IATF'}</strong> — {p.semen_bull||'—'}
+          <p style={{fontSize:10,color:'#6b7280'}}>{H.fmtDate(p.date)}{p.repasse_bull?' · Repasse: '+p.repasse_bull:''}</p>
+        </ListItem>
+      )}
+    </Card>}
+
+    {myDiags.length>0?
+      <Card>
+        <CardHeader title="🤰 Diagnósticos" action={<Badge color="blue">{myDiags.length}</Badge>}/>
+        {myDiags.map(d=>
+          <ListItem key={d.id}>
+            <Badge color={d.result==='Positivo'?'green':'red'}>{d.result}</Badge> {H.fmtDate(d.diagnosis_date)}
+            {d.expected_birth_date&&<p style={{fontSize:10,color:'#6b7280'}}>Parto previsto: {H.fmtDate(d.expected_birth_date)}</p>}
+            {d.notes&&<p style={{fontSize:10,color:'#9ca3af'}}>{d.notes}</p>}
+          </ListItem>
+        )}
+      </Card>
+    :
+      <Alert type="info">Sem diagnósticos cadastrados pra esta fêmea ainda.</Alert>
+    }
+
+    <div style={{marginTop:12}}>
+      <Btn variant="secondary" onClick={onClose} fullWidth>Fechar</Btn>
+    </div>
+  </>;
+}
+
+function OnlinePregForm({initial,lots,protocols,onSave,onCancel}){
   const[f,setF]=useState({cow_id:'',lot_id:'',diagnosis_date:TODAY,result:'Positivo',expected_birth_date:'',notes:'',...initial});
+  const[matchedProtocol,setMatchedProtocol]=useState(null);
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
-  function pickCow(id,a){const upd={cow_id:id};if(a&&a.lot_id)upd.lot_id=a.lot_id;setF(p=>({...p,...upd}));}
+  function pickCow(id,a){
+    const upd={cow_id:id};
+    if(a&&a.lot_id)upd.lot_id=a.lot_id;
+    // Buscar último protocolo dessa vaca
+    const proto=protocols&&protocols.find(p=>p.cow_id===id);
+    setMatchedProtocol(proto||null);
+    setF(p=>({...p,...upd}));
+  }
   return <>
     <OnlineAnimalPicker label="Vaca" required value={f.cow_id} onChange={pickCow} sex="Fêmea" types={['Vaca','Novilha']}/>
+
+    {matchedProtocol&&<Alert type="info" style={{marginBottom:12}}>
+      🔬 <strong>Protocolo encontrado:</strong> {matchedProtocol.protocol_name||'IATF'} de {H.fmtDate(matchedProtocol.date)}
+      {matchedProtocol.semen_bull&&<><br/>Touro IATF: <strong>{matchedProtocol.semen_bull}</strong></>}
+      {matchedProtocol.repasse_bull&&<><br/>Touro Repasse: <strong>{matchedProtocol.repasse_bull}</strong></>}
+    </Alert>}
+
     <Field label="Lote"><Select value={f.lot_id||''} onChange={e=>s('lot_id',e.target.value||null)}><option value="">—</option>{lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
     <FormRow>
       <Field label="Data Diagnóstico"><Input type="date" value={f.diagnosis_date} onChange={e=>s('diagnosis_date',e.target.value)}/></Field>
@@ -7077,7 +7368,748 @@ function OnlineSafraReport({user}){
 
 
 
-function App(){
+/* ─── FICHAS IMPRIMÍVEIS PARA CAMPO ─── */
+function OnlinePrintableSheets({user}){
+  const{data:animals,loading:lA}=useSupaQuery('animals');
+  const{data:lots,loading:lL}=useSupaQuery('lots');
+  const{data:protocols}=useSupaQuery('reproductive_protocols');
+  const[sheetType,setSheetType]=useState('weighing'); // weighing | reproduction | pregnancy
+  const[selectedLot,setSelectedLot]=useState('');
+  const[selectedSex,setSelectedSex]=useState('all'); // all | Macho | Fêmea
+  const[selectedType,setSelectedType]=useState('all'); // all | Vaca | Bezerro | etc
+  const[sheetTitle,setSheetTitle]=useState('');
+  const[sheetDate,setSheetDate]=useState(TODAY);
+  const[notes,setNotes]=useState('');
+
+  const filtered=useMemo(()=>{
+    return animals
+      .filter(a=>(a.status||'ativo')==='ativo')
+      .filter(a=>!selectedLot||selectedLot==='__no_lot__'?(selectedLot==='__no_lot__'?!a.lot_id:true):a.lot_id===selectedLot)
+      .filter(a=>selectedSex==='all'||a.sex===selectedSex)
+      .filter(a=>{
+        if(selectedType==='all')return true;
+        if(selectedType==='reprodutivas')return a.sex==='Fêmea'&&['Vaca','Novilha'].includes(a.type);
+        return a.type===selectedType;
+      })
+      .sort((a,b)=>(a.identifier||'').localeCompare(b.identifier||'',undefined,{numeric:true,sensitivity:'base'}));
+  },[animals,selectedLot,selectedSex,selectedType]);
+
+  const lot=lots.find(l=>l.id===selectedLot);
+  const titleAuto=sheetTitle||(sheetType==='weighing'?'PESAGEM':sheetType==='reproduction'?'REPRODUÇÃO':'GESTAÇÃO');
+
+  function doPrint(){window.print();}
+
+  // Para reprodução: encontrar último protocolo
+  function lastProtocol(animalId){
+    return protocols.find(p=>p.cow_id===animalId);
+  }
+
+  return <OnlinePage title="Fichas Imprimíveis" subtitle="Pra preencher no campo" icon="🖨" loading={lA||lL}>
+    <Card style={{marginBottom:12}} className="no-print">
+      <CardHeader title="⚙️ Configurar ficha" icon=""/>
+      <div style={{padding:14}}>
+        <Field label="Tipo de ficha">
+          <Select value={sheetType} onChange={e=>setSheetType(e.target.value)}>
+            <option value="weighing">⚖️ Pesagem (com peso)</option>
+            <option value="reproduction">🔬 Reprodução (IATF, repasse)</option>
+            <option value="pregnancy">🤰 Gestação (Prenha/Vazia)</option>
+            <option value="generic">📋 Genérica (campos livres)</option>
+          </Select>
+        </Field>
+
+        <FormRow>
+          <Field label="Data">
+            <Input type="date" value={sheetDate} onChange={e=>setSheetDate(e.target.value)}/>
+          </Field>
+          <Field label="Título customizado">
+            <Input value={sheetTitle} onChange={e=>setSheetTitle(e.target.value)} placeholder="Ex: PESAGEM SETEMBRO/2026"/>
+          </Field>
+        </FormRow>
+
+        <FormRow>
+          <Field label="Lote">
+            <Select value={selectedLot} onChange={e=>setSelectedLot(e.target.value)}>
+              <option value="">Todos os lotes</option>
+              <option value="__no_lot__">⚠ Sem lote</option>
+              {lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+            </Select>
+          </Field>
+          <Field label="Sexo">
+            <Select value={selectedSex} onChange={e=>setSelectedSex(e.target.value)}>
+              <option value="all">Todos</option>
+              <option value="Fêmea">Fêmeas</option>
+              <option value="Macho">Machos</option>
+            </Select>
+          </Field>
+        </FormRow>
+
+        <Field label="Categoria">
+          <Select value={selectedType} onChange={e=>setSelectedType(e.target.value)}>
+            <option value="all">Todas categorias</option>
+            <option value="reprodutivas">🐄 Apenas Vacas + Novilhas</option>
+            <option value="Vaca">Vacas</option>
+            <option value="Novilha">Novilhas</option>
+            <option value="Bezerro">Bezerros</option>
+            <option value="Garrote">Garrotes</option>
+            <option value="Touro">Touros</option>
+          </Select>
+        </Field>
+
+        <Field label="Observações da ficha (opcional)">
+          <Textarea value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Ex: Pesagem feita pela manhã..."/>
+        </Field>
+
+        <Alert type="info">
+          <strong>{filtered.length} animais</strong> serão listados na ficha (em ordem crescente de número).
+        </Alert>
+
+        <Btn onClick={doPrint} fullWidth disabled={filtered.length===0}>🖨 Imprimir ficha</Btn>
+      </div>
+    </Card>
+
+    {/* Ficha pra imprimir */}
+    <div id="printable-sheet" style={{background:'#fff',padding:'24px',borderRadius:12,fontSize:12}}>
+      <div style={{textAlign:'center',marginBottom:14,borderBottom:'2px solid #000',paddingBottom:10}}>
+        <h1 style={{fontSize:20,fontWeight:700,letterSpacing:1}}>📋 FICHA DE {titleAuto}</h1>
+        <div style={{display:'flex',justifyContent:'space-between',marginTop:10,fontSize:12}}>
+          <span><strong>Data:</strong> {H.fmtDate(sheetDate)}</span>
+          <span><strong>Lote:</strong> {lot?lot.name:'Todos'}</span>
+          <span><strong>Total:</strong> {filtered.length} animais</span>
+        </div>
+        {notes&&<p style={{marginTop:8,fontSize:11,fontStyle:'italic',textAlign:'left'}}>{notes}</p>}
+      </div>
+
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+        <thead>
+          <tr style={{background:'#000',color:'#fff'}}>
+            <th style={{padding:6,border:'1px solid #000',width:30,textAlign:'center'}}>#</th>
+            <th style={{padding:6,border:'1px solid #000',textAlign:'left'}}>Brinco</th>
+            <th style={{padding:6,border:'1px solid #000',textAlign:'center'}}>Sexo</th>
+            <th style={{padding:6,border:'1px solid #000',textAlign:'center'}}>Tipo</th>
+            <th style={{padding:6,border:'1px solid #000',textAlign:'center'}}>Raça</th>
+
+            {sheetType==='weighing'&&<>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'center',width:80}}>Peso (kg)</th>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'left',width:120}}>Obs.</th>
+            </>}
+
+            {sheetType==='reproduction'&&<>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'center',width:90}}>Data IATF</th>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'left',width:120}}>Touro IATF</th>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'center',width:90}}>Data Repasse</th>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'left',width:120}}>Touro Repasse</th>
+            </>}
+
+            {sheetType==='pregnancy'&&<>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'center',width:60}}>Prenha?</th>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'left',width:80}}>Touro IATF</th>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'center',width:90}}>Parto previsto</th>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'left',width:120}}>Obs.</th>
+            </>}
+
+            {sheetType==='generic'&&<>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'left',width:120}}>Campo 1</th>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'left',width:120}}>Campo 2</th>
+              <th style={{padding:6,border:'1px solid #000',textAlign:'left',width:140}}>Observações</th>
+            </>}
+          </tr>
+        </thead>
+        <tbody>
+          {filtered.map((a,idx)=>{
+            const proto=lastProtocol(a.identifier);
+            return <tr key={a.id} style={{height:32,pageBreakInside:'avoid'}}>
+              <td style={{padding:5,border:'1px solid #000',textAlign:'center'}}>{idx+1}</td>
+              <td style={{padding:5,border:'1px solid #000',fontWeight:600}}>{a.identifier}</td>
+              <td style={{padding:5,border:'1px solid #000',textAlign:'center'}}>{a.sex==='Fêmea'?'F':'M'}</td>
+              <td style={{padding:5,border:'1px solid #000',textAlign:'center',fontSize:10}}>{a.type}</td>
+              <td style={{padding:5,border:'1px solid #000',textAlign:'center',fontSize:10}}>{a.race}</td>
+
+              {sheetType==='weighing'&&<>
+                <td style={{padding:5,border:'1px solid #000'}}></td>
+                <td style={{padding:5,border:'1px solid #000'}}></td>
+              </>}
+
+              {sheetType==='reproduction'&&<>
+                <td style={{padding:5,border:'1px solid #000',fontSize:10}}>{proto?H.fmtDate(proto.date):''}</td>
+                <td style={{padding:5,border:'1px solid #000',fontSize:10}}>{proto?.semen_bull||''}</td>
+                <td style={{padding:5,border:'1px solid #000'}}></td>
+                <td style={{padding:5,border:'1px solid #000'}}></td>
+              </>}
+
+              {sheetType==='pregnancy'&&<>
+                <td style={{padding:5,border:'1px solid #000',textAlign:'center'}}>P / V</td>
+                <td style={{padding:5,border:'1px solid #000',fontSize:10}}>{proto?.semen_bull||''}</td>
+                <td style={{padding:5,border:'1px solid #000'}}></td>
+                <td style={{padding:5,border:'1px solid #000'}}></td>
+              </>}
+
+              {sheetType==='generic'&&<>
+                <td style={{padding:5,border:'1px solid #000'}}></td>
+                <td style={{padding:5,border:'1px solid #000'}}></td>
+                <td style={{padding:5,border:'1px solid #000'}}></td>
+              </>}
+            </tr>;
+          })}
+        </tbody>
+      </table>
+
+      <div style={{marginTop:24,paddingTop:14,borderTop:'1px dashed #999',fontSize:11}}>
+        <p>Responsável: ____________________________________  Assinatura: ____________________________________</p>
+        <p style={{marginTop:24}}>Observações gerais:</p>
+        <div style={{height:50,border:'1px solid #999',marginTop:6}}/>
+      </div>
+    </div>
+
+    <style>{`
+      @media print {
+        @page { margin: 12mm; size: A4 portrait; }
+        .no-print, .pm-sidebar, .pm-topbar, .pm-bottomnav, button { display: none !important; }
+        body, html { background: #fff !important; }
+        #printable-sheet { box-shadow: none !important; padding: 0 !important; border-radius: 0 !important; }
+        table { page-break-inside: auto; }
+        tr { page-break-inside: avoid; page-break-after: auto; }
+        thead { display: table-header-group; }
+      }
+    `}</style>
+  </OnlinePage>;
+}
+
+/* ─── IMPORTAÇÃO ASSISTIDA POR FOTO ─── 
+   Em vez de OCR (que erra com escrita manual), mostra a foto + form pré-populado
+   pra o usuário transcrever os números rapidamente */
+function OnlinePhotoImport({user}){
+  if(user.role!=='admin')return <div style={{padding:32,textAlign:'center'}}><div style={{fontSize:48}}>🔒</div><p style={{color:'#6b7280',marginTop:12}}>Acesso restrito</p></div>;
+  const{data:animals}=useSupaQuery('animals');
+  const{data:lots}=useSupaQuery('lots');
+  const[importType,setImportType]=useState('weighing');
+  const[selectedLot,setSelectedLot]=useState('');
+  const[selectedSex,setSelectedSex]=useState('all');
+  const[selectedType,setSelectedType]=useState('all');
+  const[photoUrl,setPhotoUrl]=useState(null);
+  const[date,setDate]=useState(TODAY);
+  const[stage,setStage]=useState('config'); // config | transcribing | done
+  const[entries,setEntries]=useState({});
+  const[saving,setSaving]=useState(false);
+  const[result,setResult]=useState(null);
+  const fileRef=useRef();
+
+  const filtered=useMemo(()=>{
+    return animals
+      .filter(a=>(a.status||'ativo')==='ativo')
+      .filter(a=>!selectedLot?true:(selectedLot==='__no_lot__'?!a.lot_id:a.lot_id===selectedLot))
+      .filter(a=>selectedSex==='all'||a.sex===selectedSex)
+      .filter(a=>{
+        if(selectedType==='all')return true;
+        if(selectedType==='reprodutivas')return a.sex==='Fêmea'&&['Vaca','Novilha'].includes(a.type);
+        return a.type===selectedType;
+      })
+      .sort((a,b)=>(a.identifier||'').localeCompare(b.identifier||'',undefined,{numeric:true,sensitivity:'base'}));
+  },[animals,selectedLot,selectedSex,selectedType]);
+
+  async function handlePhoto(e){
+    const file=e.target.files[0];
+    if(!file)return;
+    try{
+      const compressed=await H.compressImg(file,1200,0.85);
+      setPhotoUrl(compressed);
+    }catch(err){alert('Erro ao processar foto: '+err.message);}
+    e.target.value='';
+  }
+
+  function startTranscribing(){
+    if(filtered.length===0){alert('Nenhum animal selecionado pelos filtros.');return;}
+    if(!photoUrl){if(!confirm('Você não anexou foto. Quer continuar sem foto de referência?'))return;}
+    setStage('transcribing');
+    setEntries({});
+  }
+
+  function setEntry(animalId,field,value){
+    setEntries(p=>({...p,[animalId]:{...p[animalId],[field]:value}}));
+  }
+
+  async function saveAll(){
+    setSaving(true);
+    const result={success:0,errors:[]};
+    for(const a of filtered){
+      const e=entries[a.id]||{};
+      if(importType==='weighing'){
+        const w=parseFloat(e.weight);
+        if(!w||w<=0)continue;
+        try{
+          await window.SupaDB.insert('weighings',{
+            target_type:'animal',
+            animal_id:a.identifier,
+            lot_id:a.lot_id,
+            date,
+            weight:w,
+            category:({Vaca:'Vacas',Bezerro:'Bezerros',Touro:'Touros',Novilha:'Novilhas',Garrote:'Garrotes'})[a.type]||'Outro',
+            notes:e.notes||'',
+          });
+          result.success++;
+        }catch(err){result.errors.push({id:a.identifier,error:err.message});}
+      } else if(importType==='pregnancy'){
+        if(!e.result||e.result==='-')continue;
+        try{
+          await window.SupaDB.insert('pregnancy_diagnoses',{
+            cow_id:a.identifier,
+            lot_id:a.lot_id,
+            diagnosis_date:date,
+            result:e.result,
+            expected_birth_date:e.result==='Positivo'?H.addDays(date,283):null,
+            notes:e.notes||'',
+          });
+          result.success++;
+        }catch(err){result.errors.push({id:a.identifier,error:err.message});}
+      } else if(importType==='reproduction'){
+        if(!e.semen_bull&&!e.protocol_name)continue;
+        try{
+          await window.SupaDB.insert('reproductive_protocols',{
+            cow_id:a.identifier,
+            lot_id:a.lot_id,
+            date,
+            protocol_name:e.protocol_name||'IATF',
+            semen_bull:e.semen_bull||'',
+            bull_race:e.bull_race||'',
+            notes:e.notes||'',
+          });
+          result.success++;
+        }catch(err){result.errors.push({id:a.identifier,error:err.message});}
+      }
+    }
+    setResult(result);setStage('done');setSaving(false);
+  }
+
+  const filledCount=Object.values(entries).filter(e=>{
+    if(importType==='weighing')return e.weight&&parseFloat(e.weight)>0;
+    if(importType==='pregnancy')return e.result&&e.result!=='-';
+    if(importType==='reproduction')return e.semen_bull||e.protocol_name;
+    return false;
+  }).length;
+
+  return <OnlinePage title="Importação por Foto" subtitle="Transcrição assistida por imagem" icon="📸">
+    {stage==='config'&&<>
+      <Alert type="info">📸 <strong>Como funciona:</strong> 1) Tire foto da ficha preenchida, 2) Selecione o que importar, 3) O sistema lista os animais e você só digita os valores observando a foto. Mais rápido e confiável que OCR.</Alert>
+
+      <Card style={{marginBottom:12}}>
+        <CardHeader title="1. Tipo de importação" icon=""/>
+        <div style={{padding:12}}>
+          <Select value={importType} onChange={e=>setImportType(e.target.value)}>
+            <option value="weighing">⚖️ Pesagens</option>
+            <option value="pregnancy">🤰 Gestação (prenha/vazia)</option>
+            <option value="reproduction">🔬 Reprodução / IATF</option>
+          </Select>
+        </div>
+      </Card>
+
+      <Card style={{marginBottom:12}}>
+        <CardHeader title="2. Foto da ficha (opcional)" icon=""/>
+        <div style={{padding:12}}>
+          {photoUrl?<>
+            <img src={photoUrl} alt="Ficha" style={{width:'100%',maxHeight:300,objectFit:'contain',borderRadius:8,border:'1px solid #e5e7eb'}}/>
+            <Btn variant="secondary" onClick={()=>setPhotoUrl(null)} fullWidth style={{marginTop:8}}>🗑 Remover foto</Btn>
+          </>:<>
+            <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={handlePhoto}/>
+            <Btn onClick={()=>fileRef.current.click()} fullWidth>📷 Tirar / Escolher foto</Btn>
+            <p style={{fontSize:11,color:'#6b7280',marginTop:6}}>A foto fica visível ao lado pra você consultar enquanto transcreve.</p>
+          </>}
+        </div>
+      </Card>
+
+      <Card style={{marginBottom:12}}>
+        <CardHeader title="3. Filtrar animais" icon=""/>
+        <div style={{padding:12}}>
+          <FormRow>
+            <Field label="Lote"><Select value={selectedLot} onChange={e=>setSelectedLot(e.target.value)}>
+              <option value="">Todos</option>
+              <option value="__no_lot__">⚠ Sem lote</option>
+              {lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+            </Select></Field>
+            <Field label="Sexo"><Select value={selectedSex} onChange={e=>setSelectedSex(e.target.value)}>
+              <option value="all">Todos</option>
+              <option value="Fêmea">Fêmea</option>
+              <option value="Macho">Macho</option>
+            </Select></Field>
+          </FormRow>
+          <Field label="Tipo"><Select value={selectedType} onChange={e=>setSelectedType(e.target.value)}>
+            <option value="all">Todos</option>
+            <option value="reprodutivas">🐄 Reprodutivas (Vacas + Novilhas)</option>
+            <option value="Vaca">Vacas</option>
+            <option value="Novilha">Novilhas</option>
+            <option value="Bezerro">Bezerros</option>
+            <option value="Garrote">Garrotes</option>
+            <option value="Touro">Touros</option>
+          </Select></Field>
+          <Field label="Data" required><Input type="date" value={date} onChange={e=>setDate(e.target.value)}/></Field>
+          <Alert type="info" style={{marginTop:8}}>📋 <strong>{filtered.length}</strong> animais selecionados pra transcrição.</Alert>
+        </div>
+      </Card>
+
+      <Btn onClick={startTranscribing} fullWidth disabled={filtered.length===0}>▶ Iniciar transcrição</Btn>
+    </>}
+
+    {stage==='transcribing'&&<>
+      <div style={{position:'sticky',top:52,zIndex:50,background:'#fff',padding:12,borderBottom:'1px solid #e5e7eb',marginBottom:8}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+          <strong style={{fontSize:13}}>📋 {filtered.length} animais · {filledCount} preenchidos</strong>
+          <Btn size="sm" variant="secondary" onClick={()=>setStage('config')}>← Voltar</Btn>
+        </div>
+        <div style={{height:6,background:'#f3f4f6',borderRadius:99,overflow:'hidden'}}>
+          <div style={{height:'100%',width:(filledCount/filtered.length*100)+'%',background:'#16a34a',transition:'width 0.2s'}}/>
+        </div>
+      </div>
+
+      {photoUrl&&<details style={{marginBottom:12}}>
+        <summary style={{cursor:'pointer',padding:8,background:'#f0fdf4',borderRadius:8,fontSize:12,fontWeight:600,color:'#166534'}}>📷 Ver foto da ficha</summary>
+        <img src={photoUrl} alt="Ficha" style={{width:'100%',maxHeight:'70vh',objectFit:'contain',marginTop:8,borderRadius:8,border:'1px solid #e5e7eb'}}/>
+      </details>}
+
+      <div>
+        {filtered.map((a,idx)=>{
+          const lot=lots.find(l=>l.id===a.lot_id);
+          const e=entries[a.id]||{};
+          const filled=importType==='weighing'?(e.weight&&parseFloat(e.weight)>0):
+                       importType==='pregnancy'?(e.result&&e.result!=='-'):
+                       (e.semen_bull||e.protocol_name);
+          return <div key={a.id} style={{padding:10,marginBottom:6,background:filled?'#f0fdf4':'#fff',border:'1px solid '+(filled?'#86efac':'#e5e7eb'),borderRadius:8}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,marginBottom:6}}>
+              <div>
+                <span style={{fontSize:11,color:'#6b7280'}}>#{idx+1}</span> <strong style={{fontSize:13}}>{a.identifier}</strong>
+                <span style={{marginLeft:6,fontSize:11,color:'#6b7280'}}>{a.type} · {a.race} · {lot?.name||'—'}</span>
+              </div>
+              {filled&&<span style={{fontSize:18}}>✅</span>}
+            </div>
+            {importType==='weighing'&&<div style={{display:'flex',gap:6,alignItems:'center'}}>
+              <Input type="number" step="0.1" placeholder="Peso (kg)" value={e.weight||''} onChange={ev=>setEntry(a.id,'weight',ev.target.value)} style={{flex:1}}/>
+              <span style={{fontSize:11,color:'#6b7280'}}>kg</span>
+            </div>}
+            {importType==='pregnancy'&&<div style={{display:'flex',gap:6}}>
+              <button onClick={()=>setEntry(a.id,'result','Positivo')} style={{flex:1,padding:8,background:e.result==='Positivo'?'#16a34a':'#f3f4f6',color:e.result==='Positivo'?'#fff':'#374151',border:'none',borderRadius:6,cursor:'pointer',fontSize:12,fontWeight:600}}>🟢 Prenha</button>
+              <button onClick={()=>setEntry(a.id,'result','Negativo')} style={{flex:1,padding:8,background:e.result==='Negativo'?'#dc2626':'#f3f4f6',color:e.result==='Negativo'?'#fff':'#374151',border:'none',borderRadius:6,cursor:'pointer',fontSize:12,fontWeight:600}}>🔴 Vazia</button>
+              <button onClick={()=>setEntry(a.id,'result','-')} style={{padding:8,background:e.result==='-'?'#9ca3af':'#f3f4f6',color:e.result==='-'?'#fff':'#374151',border:'none',borderRadius:6,cursor:'pointer',fontSize:12}}>—</button>
+            </div>}
+            {importType==='reproduction'&&<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+              <Input placeholder="Touro/Sêmen" value={e.semen_bull||''} onChange={ev=>setEntry(a.id,'semen_bull',ev.target.value)}/>
+              <Select value={e.bull_race||''} onChange={ev=>setEntry(a.id,'bull_race',ev.target.value)}>
+                <option value="">Raça touro</option>
+                {H.RACES.map(r=><option key={r}>{r}</option>)}
+              </Select>
+            </div>}
+          </div>;
+        })}
+      </div>
+
+      <div style={{position:'sticky',bottom:0,background:'#fff',padding:12,borderTop:'1px solid #e5e7eb',marginTop:12}}>
+        <Btn onClick={saveAll} fullWidth disabled={filledCount===0||saving}>
+          {saving?'⏳ Salvando...':`💾 Salvar ${filledCount} ${filledCount===1?'registro':'registros'}`}
+        </Btn>
+      </div>
+    </>}
+
+    {stage==='done'&&result&&<>
+      <Alert type="success">
+        <strong>✅ Importação concluída!</strong>
+        <p style={{marginTop:4,fontSize:12}}>{result.success} registros salvos com sucesso.</p>
+        {result.errors.length>0&&<p style={{marginTop:4,fontSize:12,color:'#92400e'}}>⚠ {result.errors.length} erros (ver console).</p>}
+      </Alert>
+      {result.errors.length>0&&<Card style={{marginBottom:12}}>
+        <CardHeader title="⚠ Erros" icon=""/>
+        {result.errors.slice(0,10).map((er,i)=><ListItem key={i}><strong>{er.id}:</strong> {er.error}</ListItem>)}
+      </Card>}
+      <Btn onClick={()=>{setStage('config');setEntries({});setResult(null);setPhotoUrl(null);}} fullWidth>Nova importação</Btn>
+    </>}
+  </OnlinePage>;
+}
+
+
+  if(user.role!=='admin')return <div style={{padding:32,textAlign:'center'}}><div style={{fontSize:48}}>🔒</div><p style={{color:'#6b7280',marginTop:12}}>Acesso restrito</p></div>;
+  const{data:animals}=useSupaQuery('animals');
+  const{data:lots}=useSupaQuery('lots');
+  const[importType,setImportType]=useState('weighing');
+  const[parsed,setParsed]=useState(null);
+  const[stage,setStage]=useState('idle'); // idle | preview | importing | done
+  const[result,setResult]=useState(null);
+  const fileRef=useRef();
+
+  // Templates de cada tipo
+  const TEMPLATES={
+    weighing:{
+      title:'Pesagens',
+      icon:'⚖️',
+      table:'weighings',
+      cols:[
+        {key:'animal_id',label:'Animal (brinco)',required:true,hint:'Identificador do animal cadastrado'},
+        {key:'date',label:'Data (AAAA-MM-DD)',required:true},
+        {key:'weight',label:'Peso (kg)',required:true,type:'number'},
+        {key:'category',label:'Categoria',hint:'Vacas, Bezerros, Touros, etc.'},
+        {key:'notes',label:'Observações'},
+      ],
+    },
+    pregnancy:{
+      title:'Diagnósticos de Gestação',
+      icon:'🤰',
+      table:'pregnancy_diagnoses',
+      cols:[
+        {key:'cow_id',label:'Vaca (brinco)',required:true},
+        {key:'diagnosis_date',label:'Data Diagnóstico (AAAA-MM-DD)',required:true},
+        {key:'result',label:'Resultado',required:true,hint:'Positivo, Negativo, Duvidoso'},
+        {key:'expected_birth_date',label:'Parto Previsto (AAAA-MM-DD)',hint:'Obrigatório se Positivo'},
+        {key:'notes',label:'Observações'},
+      ],
+    },
+    reproduction:{
+      title:'Protocolos Reprodutivos',
+      icon:'🔬',
+      table:'reproductive_protocols',
+      cols:[
+        {key:'cow_id',label:'Vaca (brinco)',required:true},
+        {key:'date',label:'Data Inseminação (AAAA-MM-DD)',required:true},
+        {key:'protocol_name',label:'Protocolo',hint:'Ex: IATF'},
+        {key:'semen_bull',label:'Touro IATF / Sêmen'},
+        {key:'bull_race',label:'Raça do Touro'},
+        {key:'repasse_date',label:'Data Repasse (AAAA-MM-DD)'},
+        {key:'repasse_bull',label:'Touro Repasse'},
+        {key:'notes',label:'Observações'},
+      ],
+    },
+  };
+
+  const tmpl=TEMPLATES[importType];
+
+  function downloadTemplate(){
+    if(typeof XLSX==='undefined'){alert('Biblioteca de Excel não carregou. Recarregue a página.');return;}
+    const headers=tmpl.cols.map(c=>c.label);
+    const example=tmpl.cols.map(c=>{
+      if(c.key==='animal_id'||c.key==='cow_id')return'EX-001';
+      if(c.key.includes('date'))return TODAY;
+      if(c.key==='weight')return 350;
+      if(c.key==='result')return 'Positivo';
+      if(c.key==='protocol_name')return 'IATF';
+      return '';
+    });
+    const ws=XLSX.utils.aoa_to_sheet([headers,example]);
+    // Aplicar largura nas colunas
+    ws['!cols']=tmpl.cols.map(()=>({wch:22}));
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,tmpl.title);
+    XLSX.writeFile(wb,`template-${importType}.xlsx`);
+  }
+
+  function handleFile(e){
+    const file=e.target.files[0];
+    if(!file)return;
+    if(typeof XLSX==='undefined'){alert('Biblioteca não carregou. Recarregue a página.');return;}
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      try{
+        const wb=XLSX.read(ev.target.result,{type:'array',cellDates:true});
+        const ws=wb.Sheets[wb.SheetNames[0]];
+        const rows=XLSX.utils.sheet_to_json(ws,{header:1,blankrows:false,defval:''});
+        if(rows.length<2){alert('A planilha precisa ter cabeçalho e ao menos 1 linha de dados.');return;}
+        const headers=rows[0].map(h=>String(h||'').trim());
+        // Mapear cabeçalhos da planilha para keys do template
+        const colMap={};
+        tmpl.cols.forEach(col=>{
+          // Buscar a coluna que mais bate (insensitive)
+          const idx=headers.findIndex(h=>h.toLowerCase()===col.label.toLowerCase());
+          if(idx>=0)colMap[col.key]=idx;
+        });
+        if(Object.keys(colMap).length===0){
+          alert('Não consegui mapear as colunas. Use o template de download como base.');return;
+        }
+        const records=rows.slice(1).map((row,rowIdx)=>{
+          const obj={};
+          tmpl.cols.forEach(col=>{
+            const idx=colMap[col.key];
+            if(idx===undefined)return;
+            let v=row[idx];
+            // Converter Date pra YYYY-MM-DD
+            if(v instanceof Date){v=v.toISOString().slice(0,10);}
+            else if(typeof v==='string'&&col.key.includes('date')){
+              // Tenta normalizar dd/mm/yyyy → yyyy-mm-dd
+              const m=v.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+              if(m)v=`${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+            }
+            if(col.type==='number'&&v!==''&&v!=null){
+              const n=parseFloat(String(v).replace(',','.'));
+              if(!isNaN(n))v=n;else v=null;
+            }
+            obj[col.key]=v===''?null:v;
+          });
+          obj._rowNum=rowIdx+2; // linha real na planilha
+          return obj;
+        }).filter(r=>{
+          // Pular linhas totalmente vazias
+          return Object.keys(r).filter(k=>k!=='_rowNum').some(k=>r[k]!=null&&r[k]!=='');
+        });
+
+        // Validar cada registro
+        const animalKey=tmpl.cols.find(c=>c.key==='animal_id'||c.key==='cow_id')?.key;
+        const validated=records.map(r=>{
+          const errors=[];
+          tmpl.cols.filter(c=>c.required).forEach(c=>{
+            if(r[c.key]==null||r[c.key]==='')errors.push(`${c.label} obrigatório`);
+          });
+          // Validar animal existe
+          if(animalKey&&r[animalKey]){
+            const exists=animals.find(a=>(a.identifier||'').toLowerCase()===String(r[animalKey]).toLowerCase());
+            if(!exists)errors.push(`Animal "${r[animalKey]}" não encontrado no Inventário`);
+            else r[animalKey]=exists.identifier; // normalizar
+          }
+          return{...r,_errors:errors};
+        });
+
+        setParsed({records:validated,template:tmpl,filename:file.name});
+        setStage('preview');
+      }catch(err){
+        alert('Erro ao ler planilha: '+err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value='';
+  }
+
+  async function doImport(){
+    if(!parsed)return;
+    const valid=parsed.records.filter(r=>r._errors.length===0);
+    if(valid.length===0){alert('Nenhum registro válido.');return;}
+    if(!confirm(`Importar ${valid.length} registros para "${parsed.template.title}"?`))return;
+    setStage('importing');
+    let inserted=0;let errors=[];
+    for(const r of valid){
+      try{
+        const{_errors,_rowNum,...data}=r;
+        // Tentar mapear lot_id pelo animal
+        if(data.cow_id||data.animal_id){
+          const id=data.cow_id||data.animal_id;
+          const a=animals.find(x=>x.identifier===id);
+          if(a&&a.lot_id&&!data.lot_id)data.lot_id=a.lot_id;
+        }
+        await window.SupaDB.insert(parsed.template.table,data);
+        inserted++;
+      }catch(e){
+        errors.push({row:r._rowNum,error:e.message||String(e)});
+      }
+    }
+    setResult({inserted,errors,total:valid.length});
+    setStage('done');
+  }
+
+  const allValid=parsed?parsed.records.filter(r=>r._errors.length===0):[];
+  const allInvalid=parsed?parsed.records.filter(r=>r._errors.length>0):[];
+
+  return <OnlinePage title="Importar Excel" subtitle="Suba planilhas .xlsx em massa" icon="📊">
+    <Alert type="info">
+      <strong>Como usar:</strong><br/>
+      1. Escolha o tipo de dado<br/>
+      2. Baixe o template (formato esperado)<br/>
+      3. Preencha sua planilha (Excel/Google Sheets)<br/>
+      4. Faça upload — o sistema valida e mostra problemas antes de salvar
+    </Alert>
+
+    {stage==='idle'&&<>
+      <Card style={{marginBottom:12}}>
+        <CardHeader title="Tipo de importação"/>
+        <div style={{padding:14}}>
+          {Object.entries(TEMPLATES).map(([k,t])=>
+            <label key={k} style={{display:'flex',alignItems:'center',padding:10,borderRadius:8,border:'1px solid '+(importType===k?'#1d4ed8':'#e5e7eb'),background:importType===k?'#eff6ff':'#fff',marginBottom:6,cursor:'pointer'}}>
+              <input type="radio" checked={importType===k} onChange={()=>setImportType(k)} style={{marginRight:10}}/>
+              <span style={{fontSize:18,marginRight:8}}>{t.icon}</span>
+              <strong style={{fontSize:13}}>{t.title}</strong>
+            </label>
+          )}
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader title="Etapas" icon=""/>
+        <div style={{padding:14}}>
+          <div style={{marginBottom:14}}>
+            <p style={{fontSize:12,fontWeight:600,marginBottom:6}}>1. Baixar modelo</p>
+            <Btn variant="secondary" onClick={downloadTemplate} fullWidth>📥 Baixar template Excel ({tmpl.title})</Btn>
+          </div>
+          <div>
+            <p style={{fontSize:12,fontWeight:600,marginBottom:6}}>2. Carregar planilha preenchida</p>
+            <Btn onClick={()=>fileRef.current.click()} fullWidth>📂 Selecionar arquivo .xlsx ou .csv</Btn>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:'none'}} onChange={handleFile}/>
+          </div>
+
+          <div style={{marginTop:14,padding:10,background:'#f9fafb',borderRadius:8}}>
+            <p style={{fontSize:11,fontWeight:600,marginBottom:4}}>📋 Colunas esperadas:</p>
+            <ul style={{margin:'4px 0 0 16px',fontSize:11,color:'#6b7280'}}>
+              {tmpl.cols.map(c=><li key={c.key}>
+                <strong>{c.label}</strong>{c.required?' *':''}{c.hint?' — '+c.hint:''}
+              </li>)}
+            </ul>
+          </div>
+        </div>
+      </Card>
+    </>}
+
+    {stage==='preview'&&parsed&&<Card>
+      <CardHeader title={'Conferência: '+parsed.filename} icon="👁"/>
+      <div style={{padding:14}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:12}}>
+          <StatCard label="Total" value={parsed.records.length} color="blue"/>
+          <StatCard label="Válidos" value={allValid.length} color="green"/>
+          <StatCard label="Com erro" value={allInvalid.length} color="red"/>
+        </div>
+
+        {allInvalid.length>0&&<Alert type="warning">
+          <strong>⚠ {allInvalid.length} linhas com problemas — só os válidos serão importados.</strong>
+        </Alert>}
+
+        <div style={{maxHeight:400,overflowY:'auto',border:'1px solid #e5e7eb',borderRadius:8}}>
+          <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
+            <thead style={{position:'sticky',top:0,background:'#f3f4f6'}}>
+              <tr>
+                <th style={{padding:4,border:'1px solid #e5e7eb'}}>L</th>
+                <th style={{padding:4,border:'1px solid #e5e7eb'}}>Status</th>
+                {parsed.template.cols.slice(0,5).map(c=><th key={c.key} style={{padding:4,border:'1px solid #e5e7eb',textAlign:'left'}}>{c.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {parsed.records.slice(0,200).map((r,i)=>{
+                const ok=r._errors.length===0;
+                return <tr key={i} style={{background:ok?'#fff':'#fef2f2'}}>
+                  <td style={{padding:4,border:'1px solid #e5e7eb',textAlign:'center'}}>{r._rowNum}</td>
+                  <td style={{padding:4,border:'1px solid #e5e7eb'}}>
+                    {ok?<Badge color="green">✓</Badge>:<span style={{fontSize:10,color:'#991b1b'}}>{r._errors.join('; ')}</span>}
+                  </td>
+                  {parsed.template.cols.slice(0,5).map(c=><td key={c.key} style={{padding:4,border:'1px solid #e5e7eb'}}>{r[c.key]==null?'':String(r[c.key])}</td>)}
+                </tr>;
+              })}
+              {parsed.records.length>200&&<tr><td colSpan={7} style={{padding:8,textAlign:'center',fontStyle:'italic'}}>...e mais {parsed.records.length-200} linhas</td></tr>}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{display:'flex',gap:8,marginTop:14}}>
+          <Btn onClick={doImport} disabled={allValid.length===0} style={{flex:1}}>✅ Importar {allValid.length} válidos</Btn>
+          <Btn variant="secondary" onClick={()=>{setStage('idle');setParsed(null);}}>Cancelar</Btn>
+        </div>
+      </div>
+    </Card>}
+
+    {stage==='importing'&&<Alert type="warning">⏳ Importando... aguarde.</Alert>}
+
+    {stage==='done'&&result&&<Card>
+      <CardHeader title="Resultado" icon="📊"/>
+      <div style={{padding:14}}>
+        <Alert type="success">
+          ✅ {result.inserted} de {result.total} registros importados com sucesso!
+        </Alert>
+        {result.errors.length>0&&<Alert type="error">
+          <strong>⚠ {result.errors.length} erros:</strong>
+          <ul style={{margin:'6px 0 0 18px',fontSize:11,maxHeight:200,overflowY:'auto'}}>
+            {result.errors.map((e,i)=><li key={i}>Linha {e.row}: {e.error}</li>)}
+          </ul>
+        </Alert>}
+        <Btn onClick={()=>{setStage('idle');setParsed(null);setResult(null);}} variant="secondary" fullWidth>Nova importação</Btn>
+      </div>
+    </Card>}
+  </OnlinePage>;
+}
+
   const[user,setUser]=useState(null);
   const[page,setPage]=useState('dashboard');
   const[installPrompt,setInstallPrompt]=useState(null);
@@ -7182,6 +8214,9 @@ function App(){
       'online-analysis':<OnlineAnalysis {...onlineProps}/>,
       'online-safra':<OnlineSafraReport {...onlineProps}/>,
       'online-export':<OnlineExport {...onlineProps}/>,
+      'online-print':<OnlinePrintableSheets {...onlineProps}/>,
+      'online-import':<OnlineExcelImport {...onlineProps}/>,
+      'online-photo':<OnlinePhotoImport {...onlineProps}/>,
       'online-collaborators':<OnlineCollaborators {...onlineProps}/>,
       'online-settings':<OnlineSettings {...onlineProps} onLogout={handleOnlineLogout}/>,
     };
