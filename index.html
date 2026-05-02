@@ -5137,6 +5137,8 @@ function OnlineCollaborators({user}){
   const[loading,setLoading]=useState(true);
   const[err,setErr]=useState('');
   const[rev,setRev]=useState(0);
+  const[showCreate,setShowCreate]=useState(false);
+  const[editing,setEditing]=useState(null);
 
   useEffect(()=>{
     (async()=>{
@@ -5159,44 +5161,189 @@ function OnlineCollaborators({user}){
     }catch(e){alert('Erro: '+e.message);}
   }
 
+  async function saveProfile(u,patch){
+    try{
+      await window.SupaDB.update('profiles',u.id,patch);
+      setEditing(null);
+      setRev(r=>r+1);
+    }catch(e){alert('Erro ao salvar: '+e.message);}
+  }
+
+  async function sendPasswordReset(u){
+    if(!confirm('Enviar email de redefinição de senha para "'+u.email+'"?\n\nO usuário receberá um link para criar nova senha.'))return;
+    try{
+      const{error}=await window.SUPA.client.auth.resetPasswordForEmail(u.email);
+      if(error)throw error;
+      alert('✅ Email enviado para '+u.email+'\n\nO usuário deve verificar a caixa de entrada (e spam) e clicar no link.');
+    }catch(e){alert('Erro: '+e.message);}
+  }
+
+  async function createUser(data){
+    try{
+      // Usar signUp (cria conta E perfil via trigger)
+      const{data:authData,error}=await window.SUPA.client.auth.signUp({
+        email:data.email,
+        password:data.password,
+      });
+      if(error)throw error;
+
+      // Aguardar um pouco para o trigger criar o perfil
+      await new Promise(r=>setTimeout(r,1500));
+
+      // Atualizar perfil com nome e role
+      if(authData.user){
+        try{
+          await window.SupaDB.update('profiles',authData.user.id,{
+            name:data.name,
+            role:data.role,
+            active:true,
+          });
+        }catch(e){
+          // Se o perfil ainda não existe, tentar criar manualmente
+          try{
+            await window.SupaDB.insert('profiles',{
+              id:authData.user.id,
+              email:data.email,
+              name:data.name,
+              role:data.role,
+              active:true,
+            });
+          }catch(e2){
+            console.warn('Perfil pode ser criado automaticamente:',e2.message);
+          }
+        }
+      }
+
+      setShowCreate(false);
+      setRev(r=>r+1);
+      alert('✅ Usuário "'+data.name+'" criado!\n\n'+
+        (authData.user?.email_confirmed_at?'Pode fazer login imediatamente.':
+         'Um email de confirmação pode ter sido enviado para '+data.email+' (depende da configuração do Supabase).')+
+        '\n\nSenha: '+data.password+'\n\nGuarde essa senha e passe para o usuário!');
+    }catch(e){
+      alert('Erro ao criar usuário: '+e.message+'\n\nDicas:\n• Email já cadastrado?\n• Senha precisa ter no mínimo 6 caracteres');
+    }
+  }
+
+  async function deactivateUser(u){
+    if(u.id===user.id){alert('Você não pode desativar a si mesmo.');return;}
+    if(!confirm('🚨 DESATIVAR USUÁRIO\n\nIsso vai impedir que "'+(u.name||u.email)+'" faça login.\n\nObs: o usuário não é apagado permanentemente (apenas admin do Supabase pode fazer isso). Para reativar, basta clicar de novo no botão de status.\n\nProsseguir?'))return;
+    try{
+      await window.SupaDB.update('profiles',u.id,{active:false});
+      setRev(r=>r+1);
+    }catch(e){alert('Erro: '+e.message);}
+  }
+
   return <div style={{padding:16,paddingBottom:100}}>
-    <PageHeader title="👥 Colaboradores (online)" sub={users.length+' usuários cadastrados'}/>
-    <Alert type="info">
-      <strong>Como adicionar um novo colaborador:</strong>
-      <ol style={{margin:'8px 0 0 18px',padding:0,fontSize:12,lineHeight:1.7}}>
-        <li>Acesse seu painel do Supabase: <strong>Authentication → Users → Add user</strong></li>
-        <li>Preencha email + senha (marcar "Auto Confirm")</li>
-        <li>O perfil é criado automaticamente como "colaborador"</li>
-        <li>Volte aqui para definir permissões e ativar</li>
-      </ol>
-      <p style={{marginTop:8,fontSize:11}}>💡 Em uma versão futura, esse cadastro virá direto desta tela.</p>
-    </Alert>
+    <PageHeader title="👥 Gestão de Usuários" sub={users.length+' usuários cadastrados'}
+      action={<Btn onClick={()=>setShowCreate(true)}>+ Novo usuário</Btn>}/>
+
     {err&&<Alert type="error">{err}</Alert>}
+
+    <Alert type="info">
+      <strong>📌 O que você pode fazer:</strong>
+      <ul style={{margin:'4px 0 0 18px',fontSize:12,lineHeight:1.6}}>
+        <li><strong>Criar</strong> novos usuários (botão acima)</li>
+        <li><strong>Editar</strong> nome e função</li>
+        <li><strong>Resetar senha</strong> (envia email pro usuário)</li>
+        <li><strong>Desativar</strong> (impede login mas mantém dados)</li>
+      </ul>
+      <p style={{marginTop:6,fontSize:11,color:'#6b7280'}}>⚠ Excluir <em>permanentemente</em> precisa ser feito direto no painel do Supabase (Authentication → Users).</p>
+    </Alert>
+
     {loading?<EmptyState text="Carregando..."/>:
       <Card>
-        {users.map(u=>
-          <ListItem key={u.id}>
-            <div style={{display:'flex',alignItems:'center',gap:12}}>
-              <div style={{width:40,height:40,borderRadius:999,background:u.role==='admin'?'#fef3c7':'#f0fdf4',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}}>{u.role==='admin'?'👑':'👤'}</div>
+        {users.map(u=>{
+          const isMe=u.id===user.id;
+          return <ListItem key={u.id}>
+            <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+              <div style={{width:40,height:40,borderRadius:999,background:u.role==='admin'?'#fef3c7':'#f0fdf4',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18,flexShrink:0}}>{u.role==='admin'?'👑':'👤'}</div>
               <div style={{flex:1,minWidth:0}}>
-                <strong style={{fontSize:13}}>{u.name}</strong>
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <strong style={{fontSize:13}}>{u.name||'(sem nome)'}</strong>
+                  {isMe&&<Badge color="blue">você</Badge>}
+                  {!u.active&&<Badge color="red">desativado</Badge>}
+                </div>
                 <p style={{fontSize:11,color:'#6b7280'}}>{u.email}</p>
               </div>
-              <div style={{display:'flex',gap:6,alignItems:'center'}}>
-                <select value={u.role} onChange={e=>setRole(u,e.target.value)} style={{padding:'4px 8px',fontSize:11,border:'1px solid #d1d5db',borderRadius:6}}>
+              <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                <select value={u.role} onChange={e=>setRole(u,e.target.value)} style={{padding:'4px 8px',fontSize:11,border:'1px solid #d1d5db',borderRadius:6}} disabled={isMe}>
                   <option value="collaborator">Colaborador</option>
                   <option value="admin">Admin</option>
                 </select>
-                <button onClick={()=>toggleActive(u)} style={{padding:'4px 8px',fontSize:11,border:'1px solid '+(u.active?'#86efac':'#fca5a5'),background:u.active?'#dcfce7':'#fee2e2',color:u.active?'#166534':'#991b1b',borderRadius:6,cursor:'pointer'}}>
-                  {u.active?'Ativo':'Inativo'}
+                <button onClick={()=>setEditing(u)} title="Editar nome" style={{padding:'4px 8px',fontSize:11,border:'1px solid #d1d5db',background:'#fff',borderRadius:6,cursor:'pointer'}}>✏ Editar</button>
+                <button onClick={()=>sendPasswordReset(u)} title="Enviar email de redefinição de senha" style={{padding:'4px 8px',fontSize:11,border:'1px solid #d1d5db',background:'#fff',borderRadius:6,cursor:'pointer'}}>🔑 Senha</button>
+                <button onClick={()=>toggleActive(u)} disabled={isMe} style={{padding:'4px 8px',fontSize:11,border:'1px solid '+(u.active?'#86efac':'#fca5a5'),background:u.active?'#dcfce7':'#fee2e2',color:u.active?'#166534':'#991b1b',borderRadius:6,cursor:isMe?'not-allowed':'pointer',opacity:isMe?.5:1}}>
+                  {u.active?'✅ Ativo':'❌ Inativo'}
                 </button>
               </div>
             </div>
-          </ListItem>
-        )}
+          </ListItem>;
+        })}
       </Card>
     }
+
+    <Modal open={showCreate} onClose={()=>setShowCreate(false)} title="Criar novo usuário" size="md">
+      <CreateUserForm onSave={createUser} onCancel={()=>setShowCreate(false)}/>
+    </Modal>
+
+    <Modal open={!!editing} onClose={()=>setEditing(null)} title={editing?'Editar '+editing.email:''} size="md">
+      {editing&&<EditUserForm user={editing} onSave={(patch)=>saveProfile(editing,patch)} onCancel={()=>setEditing(null)}/>}
+    </Modal>
   </div>;
+}
+
+function CreateUserForm({onSave,onCancel}){
+  const[f,setF]=useState({name:'',email:'',password:'',role:'collaborator'});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  function gen(){
+    const chars='ABCDEFGHJKMNPQRSTUVWXYZ23456789abcdefghjkmnpqrstuvwxyz';
+    let p='';for(let i=0;i<10;i++)p+=chars[Math.floor(Math.random()*chars.length)];
+    s('password',p);
+  }
+  return <>
+    <Field label="Nome completo" required><Input value={f.name} onChange={e=>s('name',e.target.value)} placeholder="Ex: João Silva"/></Field>
+    <Field label="Email" required hint="Será usado para login"><Input type="email" value={f.email} onChange={e=>s('email',e.target.value.toLowerCase().trim())} placeholder="exemplo@email.com"/></Field>
+    <Field label="Senha inicial" required hint="Mínimo 6 caracteres. O usuário pode mudar depois.">
+      <div style={{display:'flex',gap:6}}>
+        <Input value={f.password} onChange={e=>s('password',e.target.value)} placeholder="Mínimo 6 caracteres" style={{flex:1}}/>
+        <button type="button" onClick={gen} style={{padding:'8px 12px',background:'#f3f4f6',border:'1px solid #d1d5db',borderRadius:6,cursor:'pointer',fontSize:12}}>🎲 Gerar</button>
+      </div>
+    </Field>
+    <Field label="Função"><Select value={f.role} onChange={e=>s('role',e.target.value)}>
+      <option value="collaborator">👤 Colaborador (acesso operacional)</option>
+      <option value="admin">👑 Admin (acesso total)</option>
+    </Select></Field>
+
+    <Alert type="warning">
+      ⚠ <strong>Atenção:</strong> a senha será exibida na próxima tela. Anote ou copie pra passar pro usuário. Ele pode trocar depois usando "🔑 Esqueci minha senha" no login.
+    </Alert>
+
+    <FormActions onSave={()=>{
+      if(!f.name)return alert('Nome obrigatório');
+      if(!f.email||!f.email.includes('@'))return alert('Email inválido');
+      if(!f.password||f.password.length<6)return alert('Senha precisa ter no mínimo 6 caracteres');
+      onSave(f);
+    }} onCancel={onCancel} saveLabel="Criar usuário"/>
+  </>;
+}
+
+function EditUserForm({user,onSave,onCancel}){
+  const[f,setF]=useState({name:user.name||'',role:user.role||'collaborator'});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  return <>
+    <Field label="Nome completo" required><Input value={f.name} onChange={e=>s('name',e.target.value)}/></Field>
+    <Field label="Email"><Input value={user.email} disabled hint="Email não pode ser alterado por aqui"/></Field>
+    <Field label="Função"><Select value={f.role} onChange={e=>s('role',e.target.value)}>
+      <option value="collaborator">👤 Colaborador</option>
+      <option value="admin">👑 Admin</option>
+    </Select></Field>
+    <Alert type="info">💡 Para mudar a senha, use o botão "🔑 Senha" na lista (envia email de redefinição).</Alert>
+    <FormActions onSave={()=>{
+      if(!f.name)return alert('Nome obrigatório');
+      onSave(f);
+    }} onCancel={onCancel}/>
+  </>;
 }
 
 /* ─── Tela de Configurações no modo online (resumida) ─── */
@@ -5258,7 +5405,7 @@ function OnlineDashboard({user,onNav}){
     (async()=>{
       try{
         setLoading(true);
-        const[animals,births,deaths,preg,lots,pastures,settings]=await Promise.all([
+        const[animals,births,deaths,preg,lots,pastures,settings,services]=await Promise.all([
           window.SupaDB.get('animals',{eq:{status:'ativo'}}),
           window.SupaDB.get('births'),
           window.SupaDB.get('deaths'),
@@ -5266,8 +5413,9 @@ function OnlineDashboard({user,onNav}){
           window.SupaDB.get('lots'),
           window.SupaDB.get('pastures'),
           window.SupaDB.getSettings(),
+          window.SupaDB.get('services').catch(()=>[]),
         ]);
-        setStats({animals,births,deaths,preg,lots,pastures,settings});
+        setStats({animals,births,deaths,preg,lots,pastures,settings,services});
       }catch(e){setErr(e.message);}
       finally{setLoading(false);}
     })();
@@ -5275,8 +5423,115 @@ function OnlineDashboard({user,onNav}){
 
   if(loading)return <div style={{padding:32,textAlign:'center'}}><div style={{fontSize:32}}>⏳</div><p style={{marginTop:8,color:'#6b7280'}}>Carregando dados...</p></div>;
 
-  const{animals=[],births=[],deaths=[],preg=[],lots=[],pastures=[],settings={}}=stats;
+  const{animals=[],births=[],deaths=[],preg=[],lots=[],pastures=[],settings={},services=[]}=stats;
   const farmName=settings.farm_name||'Fazenda';
+
+  // ─── Calcular alertas ───
+  const alerts=[];
+  const today=new Date();
+  const todayStr=today.toISOString().split('T')[0];
+
+  // Serviços urgentes pendentes
+  const servicosUrgentes=services.filter(s=>s.priority==='Urgente'&&['pendente','em_andamento'].includes(s.status));
+  if(servicosUrgentes.length>0){
+    alerts.push({
+      level:'urgent',icon:'🚨',
+      title:servicosUrgentes.length+' serviço(s) URGENTE(S) pendente(s)',
+      desc:servicosUrgentes.slice(0,3).map(s=>s.title).join(' · '),
+      onClick:()=>onNav('online-services'),
+    });
+  }
+
+  // Serviços atrasados
+  const servicosAtrasados=services.filter(s=>s.due_date&&s.due_date<todayStr&&['pendente','em_andamento'].includes(s.status));
+  if(servicosAtrasados.length>0){
+    alerts.push({
+      level:'warning',icon:'⏰',
+      title:servicosAtrasados.length+' serviço(s) com prazo vencido',
+      desc:servicosAtrasados.slice(0,3).map(s=>s.title).join(' · '),
+      onClick:()=>onNav('online-services'),
+    });
+  }
+
+  // 1) Partos próximos (≤7 dias) — URGENTE
+  const partosProximos=preg.filter(p=>{
+    if(p.result!=='Positivo'||!p.expected_birth_date)return false;
+    const days=H.daysUntil(p.expected_birth_date);
+    return days!==null&&days>=0&&days<=7;
+  });
+  if(partosProximos.length>0){
+    alerts.push({
+      level:'urgent',icon:'🚨',
+      title:`${partosProximos.length} parto${partosProximos.length>1?'s':''} previsto${partosProximos.length>1?'s':''} em até 7 dias`,
+      desc:partosProximos.slice(0,3).map(p=>`${p.cow_id} (${H.fmtDate(p.expected_birth_date)})`).join(' · '),
+      onClick:()=>onNav('online-pregnancy'),
+    });
+  }
+
+  // 2) Partos atrasados (data prevista já passou e não tem nascimento)
+  const partosAtrasados=preg.filter(p=>{
+    if(p.result!=='Positivo'||!p.expected_birth_date)return false;
+    const days=H.daysUntil(p.expected_birth_date);
+    if(days===null||days>=0)return false;
+    // Ver se já tem nascimento dessa vaca após a data prevista
+    const hadBirth=births.some(b=>b.mother_id===p.cow_id&&b.birth_date>=p.expected_birth_date);
+    return !hadBirth;
+  });
+  if(partosAtrasados.length>0){
+    alerts.push({
+      level:'urgent',icon:'⏰',
+      title:`${partosAtrasados.length} parto${partosAtrasados.length>1?'s':''} atrasado${partosAtrasados.length>1?'s':''} sem registro`,
+      desc:partosAtrasados.slice(0,3).map(p=>`${p.cow_id} (previsto: ${H.fmtDate(p.expected_birth_date)})`).join(' · '),
+      onClick:()=>onNav('online-pregnancy'),
+    });
+  }
+
+  // 3) Animais sem lote
+  const semLote=animals.filter(a=>!a.lot_id);
+  if(semLote.length>0){
+    alerts.push({
+      level:'warning',icon:'⚠️',
+      title:`${semLote.length} animal${semLote.length>1?'is':''} sem lote definido`,
+      desc:semLote.slice(0,5).map(a=>a.identifier).join(', ')+(semLote.length>5?'...':''),
+      onClick:()=>onNav('online-inventory'),
+    });
+  }
+
+  // 4) Pastos acima da capacidade (precisa contar animais por lote/pasto)
+  // Agregação simples: contar animais por lot_id, depois somar por pasture_id
+  const animaisPorLote={};
+  animals.forEach(a=>{if(a.lot_id)animaisPorLote[a.lot_id]=(animaisPorLote[a.lot_id]||0)+1;});
+  const animaisPorPasto={};
+  lots.forEach(l=>{if(l.pasture_id)animaisPorPasto[l.pasture_id]=(animaisPorPasto[l.pasture_id]||0)+(animaisPorLote[l.id]||0);});
+  const pastosCheios=pastures.filter(p=>p.capacity&&animaisPorPasto[p.id]>p.capacity);
+  if(pastosCheios.length>0){
+    alerts.push({
+      level:'warning',icon:'🌿',
+      title:`${pastosCheios.length} pasto${pastosCheios.length>1?'s':''} acima da capacidade`,
+      desc:pastosCheios.slice(0,3).map(p=>`${p.name}: ${animaisPorPasto[p.id]}/${p.capacity}`).join(' · '),
+      onClick:()=>onNav('online-pastures'),
+    });
+  }
+
+  // 5) Animais com identifier duplicado (refletir a validação do Inventário)
+  const seen={};const dupIds=[];
+  animals.forEach(a=>{
+    const k=(a.identifier||'').toLowerCase();
+    if(!k)return;
+    if(seen[k])dupIds.push(a.identifier);else seen[k]=true;
+  });
+  const uniqDups=[...new Set(dupIds)];
+  if(uniqDups.length>0){
+    alerts.push({
+      level:'urgent',icon:'⚠',
+      title:`${uniqDups.length} identificador${uniqDups.length>1?'es':''} duplicado${uniqDups.length>1?'s':''} no Inventário`,
+      desc:uniqDups.slice(0,5).join(', ')+(uniqDups.length>5?` ... e +${uniqDups.length-5}`:''),
+      onClick:()=>onNav('online-inventory'),
+    });
+  }
+
+  // 6) Vacas com diagnóstico positivo antigo sem novo registro (>9 meses sem update)
+  // Pulando por hora — pode ser próxima evolução
 
   return <div style={{padding:'0 0 100px'}}>
     <div style={{background:'linear-gradient(135deg,#0c4a6e,#1e40af)',padding:'24px 20px 60px'}}>
@@ -5290,9 +5545,28 @@ function OnlineDashboard({user,onNav}){
     <div style={{padding:'0 16px',marginTop:-40}}>
       {err&&<Alert type="error">{err}</Alert>}
 
-      <Alert type="success" style={{marginBottom:14}}>
-        ✨ <strong>Modo Online ativo!</strong> Todos os cadastros são sincronizados automaticamente entre os dispositivos.
-      </Alert>
+      {/* CENTRO DE ALERTAS */}
+      {alerts.length>0&&<Card style={{marginBottom:14,border:'2px solid '+(alerts.some(a=>a.level==='urgent')?'#fca5a5':'#fde68a'),background:alerts.some(a=>a.level==='urgent')?'#fef2f2':'#fffbeb'}}>
+        <div style={{padding:'12px 16px 8px',display:'flex',alignItems:'center',gap:8,borderBottom:'1px solid rgba(0,0,0,.06)'}}>
+          <span style={{fontSize:18}}>🔔</span>
+          <strong style={{fontSize:13,color:'#92400e'}}>Alertas e Lembretes</strong>
+          <Badge color={alerts.some(a=>a.level==='urgent')?'red':'amber'}>{alerts.length}</Badge>
+        </div>
+        {alerts.map((a,i)=>
+          <div key={i} onClick={a.onClick} style={{padding:'10px 16px',borderBottom:i<alerts.length-1?'1px solid rgba(0,0,0,.04)':'none',cursor:'pointer',display:'flex',gap:10,alignItems:'flex-start'}}>
+            <span style={{fontSize:18,flexShrink:0}}>{a.icon}</span>
+            <div style={{flex:1,minWidth:0}}>
+              <p style={{fontSize:12,fontWeight:600,color:a.level==='urgent'?'#991b1b':'#92400e'}}>{a.title}</p>
+              {a.desc&&<p style={{fontSize:11,color:'#6b7280',marginTop:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.desc}</p>}
+            </div>
+            <span style={{fontSize:14,color:'#9ca3af'}}>›</span>
+          </div>
+        )}
+      </Card>}
+
+      {alerts.length===0&&<Alert type="success" style={{marginBottom:14}}>
+        ✨ <strong>Tudo em ordem!</strong> Nenhum alerta no momento.
+      </Alert>}
 
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
         <StatCard label="Animais ativos" value={animals.length} color="green" icon="🐂" onClick={()=>onNav('online-inventory')}/>
@@ -5305,7 +5579,7 @@ function OnlineDashboard({user,onNav}){
 
       <p style={{fontSize:11,fontWeight:600,color:'#6b7280',textTransform:'uppercase',marginBottom:10,marginTop:16}}>Ações rápidas</p>
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
-        {[['🐮','Nascimento','online-births','#166534'],['📋','Inventário','online-inventory','#1d4ed8'],['⚖️','Pesagem','online-weighings','#d97706'],['🤰','Gestação','online-pregnancy','#9333ea'],['🔍','Buscar Animal','online-search','#0891b2'],['🔬','Reprodução','online-reproductive','#be185d']].map(([i,l,p,c])=>
+        {[['🐮','Nascimento','online-births','#166534'],['📋','Inventário','online-inventory','#1d4ed8'],['⚖️','Pesagem','online-weighings','#d97706'],['🤰','Gestação','online-pregnancy','#9333ea'],['🔍','Buscar Animal','online-search','#0891b2'],['🔧','Serviços','online-services','#0c4a6e']].map(([i,l,p,c])=>
           <button key={p} onClick={()=>onNav(p)} style={{padding:'16px 12px',background:c,color:'#fff',borderRadius:12,textAlign:'left',cursor:'pointer',border:'none'}}>
             <div style={{fontSize:26,marginBottom:6}}>{i}</div>
             <div style={{fontSize:12,fontWeight:600}}>{l}</div>
@@ -5316,7 +5590,7 @@ function OnlineDashboard({user,onNav}){
       {user.role==='admin'&&<>
         <p style={{fontSize:11,fontWeight:600,color:'#6b7280',textTransform:'uppercase',marginBottom:10,marginTop:8}}>Análises e Relatórios</p>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-          {[['📊','Análises','online-analysis','#7c3aed'],['📑','Relatório de Safra','online-safra','#0c4a6e'],['🖨','Fichas Imprim.','online-print','#0891b2'],['📊','Importar Excel','online-import','#15803d'],['📸','Importar por Foto','online-photo','#7e22ce'],['📥','Exportar CSV','online-export','#059669'],['👥','Colaboradores','online-collaborators','#1e40af']].map(([i,l,p,c])=>
+          {[['📊','Análises','online-analysis','#7c3aed'],['📑','Relatório de Safra','online-safra','#0c4a6e'],['🖨','Fichas Imprim.','online-print','#0891b2'],['🖼','Galeria','online-gallery','#a855f7'],['📊','Importar Excel','online-import','#15803d'],['📸','Importar por Foto','online-photo','#7e22ce'],['📥','Exportar CSV','online-export','#059669'],['👥','Colaboradores','online-collaborators','#1e40af']].map(([i,l,p,c])=>
             <button key={p} onClick={()=>onNav(p)} style={{padding:'14px 12px',background:c,color:'#fff',borderRadius:12,textAlign:'left',cursor:'pointer',border:'none'}}>
               <div style={{fontSize:22,marginBottom:4}}>{i}</div>
               <div style={{fontSize:11,fontWeight:600}}>{l}</div>
@@ -5343,6 +5617,7 @@ const ONLINE_NAV=[
   {id:'online-herbicide',icon:'🌿',label:'Herbicida',roles:['admin','collaborator']},
   {id:'online-mineral',icon:'🧂',label:'Sal mineral',roles:['admin','collaborator']},
   {id:'online-feces',icon:'🔍',label:'Fezes',roles:['admin','collaborator']},
+  {id:'online-services',icon:'🔧',label:'Serviços',roles:['admin','collaborator']},
   {id:'online-inventory',icon:'📋',label:'Inventário',roles:['admin','collaborator']},
   {id:'online-exits',icon:'📤',label:'Saída de Animais',roles:['admin']},
   {id:'online-revenues',icon:'💰',label:'Receitas',roles:['admin']},
@@ -5353,6 +5628,7 @@ const ONLINE_NAV=[
   {id:'online-print',icon:'🖨',label:'Fichas Imprim.',roles:['admin','collaborator']},
   {id:'online-import',icon:'📊',label:'Importar Excel',roles:['admin']},
   {id:'online-photo',icon:'📸',label:'Importar por Foto',roles:['admin']},
+  {id:'online-gallery',icon:'🖼',label:'Galeria de Fotos',roles:['admin','collaborator']},
   {id:'online-collaborators',icon:'👥',label:'Colaboradores',roles:['admin']},
   {id:'online-settings',icon:'⚙️',label:'Configurações',roles:['admin']},
 ];
@@ -5629,7 +5905,8 @@ function OnlineInventory({user,onNav}){
 }
 
 function OnlineAnimalForm({initial,lots,onSave,onCancel}){
-  const[f,setF]=useState({identifier:'',type:'Vaca',race:'Nelore',sex:'Fêmea',birth_date:'',lot_id:'',farm_tag:'',official_tag:'',notes:'',...initial});
+  const[f,setF]=useState({identifier:'',type:'Vaca',race:'Nelore',sex:'Fêmea',birth_date:'',lot_id:'',farm_tag:'',official_tag:'',notes:'',father:'',mother:'',paternal_grandfather:'',paternal_grandmother:'',maternal_grandfather:'',maternal_grandmother:'',...initial});
+  const[showGenealogy,setShowGenealogy]=useState(!!(initial&&(initial.father||initial.mother||initial.paternal_grandfather)));
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   return <>
     <FormRow>
@@ -5648,6 +5925,28 @@ function OnlineAnimalForm({initial,lots,onSave,onCancel}){
       <Field label="Brinco Fazenda"><Input value={f.farm_tag||''} onChange={e=>s('farm_tag',e.target.value)}/></Field>
       <Field label="Brinco CIDASC"><Input value={f.official_tag||''} onChange={e=>s('official_tag',e.target.value)}/></Field>
     </FormRow>
+
+    <button type="button" onClick={()=>setShowGenealogy(!showGenealogy)} style={{width:'100%',padding:10,background:'#f3f4f6',border:'1px solid #e5e7eb',borderRadius:8,marginBottom:12,cursor:'pointer',fontSize:13,fontWeight:600,color:'#374151',textAlign:'left'}}>
+      {showGenealogy?'▼':'▶'} 🧬 Genealogia (pais e avós)
+    </button>
+
+    {showGenealogy&&<div style={{padding:'4px 0 12px'}}>
+      <FormRow>
+        <Field label="Pai"><Input value={f.father||''} onChange={e=>s('father',e.target.value)} placeholder="Nome/ID do pai"/></Field>
+        <Field label="Mãe"><Input value={f.mother||''} onChange={e=>s('mother',e.target.value)} placeholder="Nome/ID da mãe"/></Field>
+      </FormRow>
+      <p style={{fontSize:11,color:'#6b7280',marginBottom:6,marginTop:8,fontWeight:600}}>Avós paternos:</p>
+      <FormRow>
+        <Field label="Avô paterno"><Input value={f.paternal_grandfather||''} onChange={e=>s('paternal_grandfather',e.target.value)}/></Field>
+        <Field label="Avó paterna"><Input value={f.paternal_grandmother||''} onChange={e=>s('paternal_grandmother',e.target.value)}/></Field>
+      </FormRow>
+      <p style={{fontSize:11,color:'#6b7280',marginBottom:6,marginTop:8,fontWeight:600}}>Avós maternos:</p>
+      <FormRow>
+        <Field label="Avô materno"><Input value={f.maternal_grandfather||''} onChange={e=>s('maternal_grandfather',e.target.value)}/></Field>
+        <Field label="Avó materna"><Input value={f.maternal_grandmother||''} onChange={e=>s('maternal_grandmother',e.target.value)}/></Field>
+      </FormRow>
+    </div>}
+
     <Field label="Observações"><Textarea value={f.notes||''} onChange={e=>s('notes',e.target.value)}/></Field>
     <FormActions onSave={()=>{if(!f.identifier)return alert('Identificador obrigatório');onSave(f);}} onCancel={onCancel}/>
   </>;
@@ -5655,6 +5954,7 @@ function OnlineAnimalForm({initial,lots,onSave,onCancel}){
 
 function OnlineAnimalDetail({animal,lots,user,onEdit,onDelete,onClose}){
   const lot=lots.find(l=>l.id===animal.lot_id);
+  const hasGenealogy=animal.father||animal.mother||animal.paternal_grandfather||animal.paternal_grandmother||animal.maternal_grandfather||animal.maternal_grandmother;
   return <>
     {animal.status==='saiu'&&<Alert type="warning">📤 Animal saiu em {H.fmtDate(animal.exit_date)} · Motivo: {animal.exit_reason}</Alert>}
     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,fontSize:13,marginBottom:12}}>
@@ -5668,6 +5968,19 @@ function OnlineAnimalDetail({animal,lots,user,onEdit,onDelete,onClose}){
       <Info label="CIDASC" value={animal.official_tag||'—'}/>
       {animal.notes&&<div style={{gridColumn:'1/-1'}}><Info label="Observações" value={animal.notes}/></div>}
     </div>
+
+    {hasGenealogy&&<div style={{marginBottom:12,padding:12,background:'#f9fafb',borderRadius:8,border:'1px solid #e5e7eb'}}>
+      <p style={{fontSize:12,fontWeight:700,marginBottom:8,color:'#374151'}}>🧬 Genealogia</p>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,fontSize:12}}>
+        <Info label="Pai" value={animal.father||'—'}/>
+        <Info label="Mãe" value={animal.mother||'—'}/>
+        <Info label="Avô paterno" value={animal.paternal_grandfather||'—'}/>
+        <Info label="Avó paterna" value={animal.paternal_grandmother||'—'}/>
+        <Info label="Avô materno" value={animal.maternal_grandfather||'—'}/>
+        <Info label="Avó materna" value={animal.maternal_grandmother||'—'}/>
+      </div>
+    </div>}
+
     <div style={{display:'flex',gap:8}}>
       <Btn onClick={onEdit} style={{flex:1}}>Editar</Btn>
       {user.role==='admin'&&<Btn variant="danger" onClick={onDelete}>Excluir</Btn>}
@@ -5829,6 +6142,19 @@ function OnlineBirths({user}){
 
   async function save(data){
     try{
+      // Validação: bezerro com mesmo identifier já existe?
+      if(!editing&&data.calf_id){
+        const exists=await asyncFindAnimal(data.calf_id);
+        if(exists){
+          if(!confirm(`⚠ Já existe um animal com identifier "${data.calf_id}" no Inventário.\n\nProsseguir mesmo assim?\n(O nascimento será registrado, mas não criará animal duplicado)`))return;
+        }
+      }
+      // Validação: já existe nascimento desse bezerro?
+      const dupBirth=items.find(b=>b.calf_id===data.calf_id&&(!editing||b.id!==editing.id));
+      if(dupBirth){
+        if(!confirm(`⚠ Já existe um nascimento registrado para o bezerro "${data.calf_id}".\n\nProsseguir mesmo assim?`))return;
+      }
+
       if(editing)await window.SupaDB.update('births',editing.id,data);
       else{
         await window.SupaDB.insert('births',data);
@@ -5839,6 +6165,7 @@ function OnlineBirths({user}){
             identifier:data.calf_id,type:'Bezerro',race:data.calf_race,sex:data.calf_sex,
             birth_date:data.birth_date,lot_id:data.lot_id||null,
             farm_tag:data.farm_tag||data.calf_id,official_tag:data.official_tag||'',
+            father:data.bull_name||null,mother:data.mother_id||null,
             notes:'Criado automaticamente no nascimento',status:'ativo',
           });
         }
@@ -5931,14 +6258,27 @@ function OnlineMortality({user}){
 
   async function save(data){
     try{
-      if(editing)await window.SupaDB.update('deaths',editing.id,data);
-      else{
+      if(!editing){
+        // Verificar se animal existe e está ativo
+        const a=await asyncFindAnimal(data.animal_id);
+        if(!a){
+          if(!confirm(`⚠ Animal "${data.animal_id}" NÃO está no Inventário.\n\nProsseguir mesmo assim?\n(O registro será salvo, mas sem vínculo com Inventário)`))return;
+        } else if(a.status==='saiu'){
+          alert(`❌ Animal "${data.animal_id}" já saiu da propriedade em ${H.fmtDate(a.exit_date)} (motivo: ${a.exit_reason}).\n\nNão é possível registrar nova morte.`);
+          return;
+        }
+        // Verificar se já existe death pra esse animal
+        const dup=items.find(d=>d.animal_id===data.animal_id);
+        if(dup){
+          if(!confirm(`⚠ Já existe registro de morte para "${data.animal_id}" em ${H.fmtDate(dup.death_date)}.\n\nProsseguir mesmo assim?`))return;
+        }
         await window.SupaDB.insert('deaths',data);
         // Marcar animal como saiu
-        const a=await asyncFindAnimal(data.animal_id);
         if(a&&a.status!=='saiu'){
           await window.SupaDB.update('animals',a.id,{status:'saiu',exit_date:data.death_date,exit_reason:'morte'});
         }
+      } else {
+        await window.SupaDB.update('deaths',editing.id,data);
       }
       setShowForm(false);setEditing(null);reload();
     }catch(e){alert('Erro: '+e.message);}
@@ -6005,6 +6345,18 @@ function OnlineWeighings({user}){
 
   async function save(data){
     try{
+      if(!editing&&data.animal_id){
+        // Verificar se animal está ativo
+        const a=await asyncFindAnimal(data.animal_id);
+        if(a&&a.status==='saiu'){
+          if(!confirm(`⚠ Animal "${data.animal_id}" já saiu da propriedade.\n\nProsseguir mesmo assim?`))return;
+        }
+        // Verificar pesagem duplicada (mesmo animal, mesma data)
+        const dup=items.find(w=>w.animal_id===data.animal_id&&w.date===data.date&&(!editing||w.id!==editing.id));
+        if(dup){
+          if(!confirm(`⚠ Já existe pesagem de "${data.animal_id}" em ${H.fmtDate(data.date)} (${dup.weight}kg).\n\nProsseguir mesmo assim?`))return;
+        }
+      }
       if(editing)await window.SupaDB.update('weighings',editing.id,data);
       else await window.SupaDB.insert('weighings',data);
       setShowForm(false);setEditing(null);reload();
@@ -6248,15 +6600,21 @@ function OnlinePregnancy({user}){
       const protocol=protocols.find(p=>p.cow_id===female.identifier);
       const data={
         cow_id:female.identifier,
-        lot_id:female.lot_id,
+        lot_id:female.lot_id||null,
         diagnosis_date:TODAY,
         result,
         expected_birth_date:result==='Positivo'?H.addDays(TODAY,283):null,
-        notes:protocol?'Vinculado ao protocolo de '+H.fmtDate(protocol.date):'',
+        notes:protocol?'Vinculado ao protocolo de '+H.fmtDate(protocol.date):null,
       };
-      await window.SupaDB.insert('pregnancy_diagnoses',data);
+      // Limpar campos vazios pra evitar erro UUID inválido
+      Object.keys(data).forEach(k=>{if(data[k]==='')data[k]=null;});
+      const r=await window.SupaDB.insert('pregnancy_diagnoses',data);
+      if(!r){throw new Error('Falha ao salvar — verifique sua conexão');}
       reload();
-    }catch(e){alert('Erro: '+e.message);}
+    }catch(e){
+      console.error('Erro no quickDiagnose:',e);
+      alert('Erro ao salvar diagnóstico: '+(e.message||e.toString())+'\n\nPossíveis causas:\n• Sem conexão com Supabase\n• Permissão insuficiente\n• Sessão expirada (faça login novamente)');
+    }
   }
 
   // Para cada fêmea, encontrar o último diagnóstico e o último protocolo
@@ -7111,6 +7469,50 @@ function OnlineExport({user}){
     alert('✅ Exportação concluída!');
   }
 
+  async function exportFullBackup(){
+    if(!confirm('Baixar BACKUP COMPLETO em JSON?\n\nUm único arquivo com TODOS os dados do Supabase. Útil pra:\n• Cópia de segurança fora da nuvem\n• Restaurar em outro Supabase\n• Auditoria\n\nProsseguir?'))return;
+    setExporting(true);
+    try{
+      const tables=['animals','pastures','lots','births','deaths','weighings',
+        'reproductive_protocols','pregnancy_diagnoses','health_managements',
+        'herbicide_applications','mineral_supplementations','feces_records',
+        'animal_exits','animal_lot_history','pasture_movements'];
+      if(user.role==='admin'){tables.push('revenues','costs','farm_settings');}
+
+      const backup={
+        _meta:{
+          source:'PecuáriaManager Online',
+          exported_at:new Date().toISOString(),
+          exported_by:user.email,
+          version:'1.0',
+        },
+        data:{},
+      };
+      for(const t of tables){
+        try{
+          backup.data[t]=await window.SupaDB.get(t);
+        }catch(e){
+          backup.data[t]=[];
+          console.warn(`Erro em ${t}:`,e.message);
+        }
+      }
+
+      const json=JSON.stringify(backup,null,2);
+      const blob=new Blob([json],{type:'application/json'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url;
+      a.download=`pecuaria-backup-online-${TODAY}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      const totalRecords=Object.values(backup.data).reduce((s,arr)=>s+(Array.isArray(arr)?arr.length:0),0);
+      alert(`✅ Backup completo baixado!\n\n${tables.length} tabelas · ${totalRecords} registros total`);
+      setLastExport({table:'__backup__',label:'Backup completo (JSON)',count:totalRecords,when:new Date().toLocaleTimeString()});
+    }catch(e){alert('Erro: '+e.message);}
+    finally{setExporting(false);}
+  }
+
   const tables=[
     ['animals','📋 Animais','blue'],
     ['pastures','🌿 Pastos','green'],
@@ -7135,10 +7537,23 @@ function OnlineExport({user}){
     <Alert type="info">📊 Os arquivos CSV abrem perfeitamente no Excel, Google Sheets, LibreOffice etc.</Alert>
 
     <Card style={{marginBottom:12}}>
-      <CardHeader title="Exportar tudo de uma vez" icon="📦"/>
+      <CardHeader title="💾 Backup completo (JSON)" icon=""/>
       <div style={{padding:12}}>
-        <Btn onClick={exportAll} fullWidth disabled={exporting}>
-          {exporting?'⏳ Exportando...':'📦 Baixar TODAS as planilhas'}
+        <p style={{fontSize:12,color:'#6b7280',marginBottom:10}}>
+          Baixa <strong>todos os dados do Supabase em um único arquivo JSON</strong>. 
+          Útil pra cópia de segurança fora da nuvem ou pra restaurar em outro projeto.
+        </p>
+        <Btn onClick={exportFullBackup} fullWidth disabled={exporting} variant="primary">
+          {exporting?'⏳ Gerando backup...':'💾 Baixar backup completo (JSON)'}
+        </Btn>
+      </div>
+    </Card>
+
+    <Card style={{marginBottom:12}}>
+      <CardHeader title="Exportar tudo de uma vez (CSV)" icon="📦"/>
+      <div style={{padding:12}}>
+        <Btn onClick={exportAll} fullWidth disabled={exporting} variant="secondary">
+          {exporting?'⏳ Exportando...':'📦 Baixar TODAS as planilhas CSV'}
         </Btn>
       </div>
     </Card>
@@ -8112,6 +8527,305 @@ function OnlineExcelImport({user}){
   </OnlinePage>;
 }
 
+/* ─── GALERIA DE FOTOS ONLINE ─── */
+function OnlineGallery({user}){
+  const{data:births,loading:lB}=useSupaQuery('births');
+  const{data:deaths,loading:lD}=useSupaQuery('deaths');
+  const{data:feces,loading:lF}=useSupaQuery('feces_records');
+  const[filter,setFilter]=useState('all');
+  const[lightbox,setLightbox]=useState(null);
+  const loading=lB||lD||lF;
+
+  const photos=useMemo(()=>{
+    const out=[];
+    (births||[]).forEach(b=>{
+      if(b.cow_photo)out.push({img:b.cow_photo,type:'birth-cow',label:'Mãe '+b.mother_id,date:b.birth_date,ref:b.id,category:'births',extra:'Bezerro: '+b.calf_id});
+      if(b.calf_photo)out.push({img:b.calf_photo,type:'birth-calf',label:'Bezerro '+b.calf_id,date:b.birth_date,ref:b.id,category:'births',extra:b.calf_sex+' · '+b.birth_weight+'kg'});
+    });
+    (deaths||[]).forEach(d=>{
+      if(d.photo)out.push({img:d.photo,type:'death',label:d.animal_id,date:d.death_date,ref:d.id,category:'mortality',extra:d.cause});
+    });
+    (feces||[]).forEach(f=>{
+      if(f.image)out.push({img:f.image,type:'feces',label:'Fezes '+H.fmtDate(f.date),date:f.date,ref:f.id,category:'feces',extra:f.category||''});
+    });
+    return out.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  },[births,deaths,feces]);
+
+  const CATS={all:'Todas',births:'🐮 Nascimentos',mortality:'✝ Mortalidade',feces:'🔍 Fezes'};
+  const filtered=filter==='all'?photos:photos.filter(p=>p.category===filter);
+  const counts={};photos.forEach(p=>{counts[p.category]=(counts[p.category]||0)+1;});
+
+  return <OnlinePage title="Galeria de Fotos" subtitle={photos.length+' foto'+(photos.length!==1?'s':'')+' no sistema'} icon="📸" loading={loading}>
+
+    <div style={{display:'flex',gap:4,marginBottom:14,background:'#f3f4f6',padding:4,borderRadius:10,overflowX:'auto'}}>
+      {Object.entries(CATS).map(([id,lbl])=>{
+        const c=id==='all'?photos.length:counts[id]||0;
+        return <button key={id} onClick={()=>setFilter(id)} style={{flex:'1 0 auto',padding:8,background:filter===id?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:filter===id?600:400,color:filter===id?'#1e40af':'#6b7280',whiteSpace:'nowrap'}}>
+          {lbl} ({c})
+        </button>;
+      })}
+    </div>
+
+    {filtered.length===0
+      ? <EmptyState icon="📷" text={filter==='all'?'Nenhuma foto cadastrada ainda':'Nenhuma foto nesta categoria'}/>
+      : <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:8}}>
+          {filtered.map((p,i)=>
+            <div key={i} onClick={()=>setLightbox(p)} style={{position:'relative',aspectRatio:'1',borderRadius:8,overflow:'hidden',cursor:'pointer',border:'1px solid #e5e7eb',background:'#f3f4f6'}}>
+              <img src={p.img} alt={p.label} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+              <div style={{position:'absolute',bottom:0,left:0,right:0,padding:'20px 8px 8px',background:'linear-gradient(transparent,rgba(0,0,0,.75))',color:'#fff',fontSize:10}}>
+                <div style={{fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.label}</div>
+                <div style={{fontSize:9,opacity:.85}}>{H.fmtDate(p.date)}</div>
+              </div>
+            </div>
+          )}
+        </div>
+    }
+
+    {lightbox&&<div onClick={()=>setLightbox(null)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.92)',zIndex:2000,display:'flex',alignItems:'center',justifyContent:'center',padding:16,flexDirection:'column'}}>
+      <img src={lightbox.img} alt={lightbox.label} style={{maxWidth:'100%',maxHeight:'75vh',objectFit:'contain',borderRadius:8}}/>
+      <div style={{marginTop:12,color:'#fff',textAlign:'center'}}>
+        <strong style={{fontSize:14}}>{lightbox.label}</strong>
+        <p style={{fontSize:12,opacity:.8,marginTop:2}}>{lightbox.extra} · {H.fmtDate(lightbox.date)}</p>
+      </div>
+      <button onClick={()=>setLightbox(null)} style={{position:'absolute',top:16,right:16,width:40,height:40,borderRadius:999,background:'rgba(255,255,255,.2)',border:'none',color:'#fff',fontSize:24,cursor:'pointer'}}>×</button>
+    </div>}
+  </OnlinePage>;
+}
+
+/* ─── SERVIÇOS / MANUTENÇÕES DA PROPRIEDADE ─── */
+const SVC_CATEGORIES=['Cerca','Estrutura','Equipamento','Veículo','Limpeza','Roçada','Aguada','Galpão','Casa','Outro'];
+const SVC_PRIORITIES=['Baixa','Média','Alta','Urgente'];
+
+function OnlineServices({user}){
+  const{data:items,loading,error,reload}=useSupaQuery('services',{order:{column:'reported_at',ascending:false}});
+  const{data:pastures}=useSupaQuery('pastures');
+  const{data:profiles}=useSupaQuery('profiles');
+  const[showForm,setShowForm]=useState(false);
+  const[editing,setEditing]=useState(null);
+  const[detail,setDetail]=useState(null);
+  const[filterStatus,setFilterStatus]=useState('open');
+  const[filterPriority,setFilterPriority]=useState('all');
+  const[query,setQuery]=useState('');
+
+  async function save(data){
+    try{
+      if(editing)await window.SupaDB.update('services',editing.id,data);
+      else await window.SupaDB.insert('services',{...data,reported_by:user.id});
+      setShowForm(false);setEditing(null);reload();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+
+  async function markDone(svc){
+    const notes=prompt('Observações sobre a conclusão (opcional):','');
+    if(notes===null)return;
+    try{
+      await window.SupaDB.update('services',svc.id,{
+        status:'concluido',
+        completed_by:user.id,
+        completed_at:new Date().toISOString(),
+        completion_notes:notes||null,
+      });
+      setDetail(null);reload();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+
+  async function reopenService(svc){
+    if(!confirm('Reabrir este serviço como pendente?'))return;
+    try{
+      await window.SupaDB.update('services',svc.id,{
+        status:'pendente',completed_by:null,completed_at:null,completion_notes:null,
+      });
+      setDetail(null);reload();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+
+  async function del(id){
+    if(user.role!=='admin'){alert('Apenas admin pode apagar.');return;}
+    if(!confirm('Excluir este serviço?'))return;
+    try{await window.SupaDB.remove('services',id);setDetail(null);reload();}
+    catch(e){alert('Erro: '+e.message);}
+  }
+
+  const filtered=items.filter(s=>{
+    if(filterStatus==='open'&&!['pendente','em_andamento'].includes(s.status))return false;
+    if(filterStatus==='done'&&s.status!=='concluido')return false;
+    if(filterStatus==='cancelled'&&s.status!=='cancelado')return false;
+    if(filterPriority!=='all'&&s.priority!==filterPriority)return false;
+    if(query){
+      const q=query.toLowerCase();
+      if(!(s.title||'').toLowerCase().includes(q)&&!(s.description||'').toLowerCase().includes(q)&&!(s.location||'').toLowerCase().includes(q))return false;
+    }
+    return true;
+  });
+
+  const stats={
+    pending:items.filter(s=>s.status==='pendente').length,
+    progress:items.filter(s=>s.status==='em_andamento').length,
+    done:items.filter(s=>s.status==='concluido').length,
+    urgent:items.filter(s=>s.priority==='Urgente'&&['pendente','em_andamento'].includes(s.status)).length,
+  };
+
+  function statusInfo(st){
+    return{
+      pendente:{icon:'⏳',color:'amber',label:'Pendente'},
+      em_andamento:{icon:'🔧',color:'blue',label:'Em andamento'},
+      concluido:{icon:'✅',color:'green',label:'Concluído'},
+      cancelado:{icon:'❌',color:'gray',label:'Cancelado'},
+    }[st]||{icon:'❓',color:'gray',label:st};
+  }
+  function priorityColor(p){
+    return{Urgente:'red',Alta:'amber',Média:'blue',Baixa:'gray'}[p]||'gray';
+  }
+
+  return <OnlinePage title="Serviços e Manutenções" subtitle={items.length+' registros'} icon="🔧" loading={loading} error={error}
+    action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
+
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:8,marginBottom:12}}>
+      <StatCard label="Pendentes" value={stats.pending} color="amber" icon="⏳"/>
+      <StatCard label="Andamento" value={stats.progress} color="blue" icon="🔧"/>
+      <StatCard label="Concluídos" value={stats.done} color="green" icon="✅"/>
+      <StatCard label="Urgentes" value={stats.urgent} color="red" icon="🚨"/>
+    </div>
+
+    <Card style={{marginBottom:12,padding:12}}>
+      <Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar..." style={{marginBottom:8}}/>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+        <Select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}>
+          <option value="open">⏳ Em aberto ({stats.pending+stats.progress})</option>
+          <option value="done">✅ Concluídos ({stats.done})</option>
+          <option value="cancelled">❌ Cancelados</option>
+          <option value="all">Todos</option>
+        </Select>
+        <Select value={filterPriority} onChange={e=>setFilterPriority(e.target.value)}>
+          <option value="all">Todas prioridades</option>
+          {SVC_PRIORITIES.map(p=><option key={p}>{p}</option>)}
+        </Select>
+      </div>
+    </Card>
+
+    <Card>
+      {filtered.length===0?<EmptyState icon="🔧" text={query?'Nenhum serviço encontrado':'Nenhum serviço cadastrado'} action={!query&&<Btn onClick={()=>setShowForm(true)}>Cadastrar primeiro</Btn>}/>:
+        filtered.map(s=>{
+          const si=statusInfo(s.status);
+          return <ListItem key={s.id} onClick={()=>setDetail(s)}>
+            <div style={{display:'flex',alignItems:'flex-start',gap:8}}>
+              <span style={{fontSize:22}}>{si.icon}</span>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                  <strong style={{fontSize:13,textDecoration:s.status==='concluido'?'line-through':'none',color:s.status==='concluido'?'#6b7280':'#111827'}}>{s.title}</strong>
+                  <Badge color={priorityColor(s.priority)}>{s.priority}</Badge>
+                  {s.category&&<Badge color="gray">{s.category}</Badge>}
+                </div>
+                <p style={{fontSize:11,color:'#6b7280',marginTop:2}}>
+                  {s.location?'📍 '+s.location+' · ':''}
+                  Reportado em {H.fmtDate((s.reported_at||'').split('T')[0])}
+                  {s.due_date?' · 📅 prazo: '+H.fmtDate(s.due_date):''}
+                </p>
+              </div>
+            </div>
+          </ListItem>;
+        })
+      }
+    </Card>
+
+    <Modal open={showForm} onClose={()=>{setShowForm(false);setEditing(null);}} title={editing?'Editar Serviço':'Novo Serviço'} size="lg">
+      <OnlineServiceForm initial={editing} pastures={pastures} profiles={profiles} user={user} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
+    </Modal>
+
+    <Modal open={!!detail} onClose={()=>setDetail(null)} title={detail?detail.title:''} size="lg">
+      {detail&&<OnlineServiceDetail svc={detail} pastures={pastures} profiles={profiles} user={user}
+        onEdit={()=>{setEditing(detail);setShowForm(true);setDetail(null);}}
+        onDelete={()=>del(detail.id)}
+        onMarkDone={()=>markDone(detail)}
+        onReopen={()=>reopenService(detail)}
+        onClose={()=>setDetail(null)} statusInfo={statusInfo} priorityColor={priorityColor}/>}
+    </Modal>
+  </OnlinePage>;
+}
+
+function OnlineServiceForm({initial,pastures,profiles,user,onSave,onCancel}){
+  const[f,setF]=useState({title:'',description:'',category:'Outro',priority:'Média',location:'',pasture_id:'',status:'pendente',assigned_to:'',due_date:'',cost:'',notes:'',...initial});
+  const s=(k,v)=>setF(p=>({...p,[k]:v}));
+  return <>
+    <Field label="Título" required hint="Ex: Cerca caída no pasto sul"><Input value={f.title} onChange={e=>s('title',e.target.value)}/></Field>
+    <Field label="Descrição"><Textarea value={f.description||''} onChange={e=>s('description',e.target.value)} rows={3} placeholder="Detalhes do que precisa ser feito..."/></Field>
+    <FormRow>
+      <Field label="Categoria"><Select value={f.category} onChange={e=>s('category',e.target.value)}>{SVC_CATEGORIES.map(c=><option key={c}>{c}</option>)}</Select></Field>
+      <Field label="Prioridade"><Select value={f.priority} onChange={e=>s('priority',e.target.value)}>{SVC_PRIORITIES.map(p=><option key={p}>{p}</option>)}</Select></Field>
+    </FormRow>
+    <FormRow>
+      <Field label="Local (texto livre)"><Input value={f.location||''} onChange={e=>s('location',e.target.value)} placeholder="Ex: Esquina sul do pasto"/></Field>
+      <Field label="Pasto vinculado"><Select value={f.pasture_id||''} onChange={e=>s('pasture_id',e.target.value||null)}><option value="">— Nenhum —</option>{pastures.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select></Field>
+    </FormRow>
+    <FormRow>
+      <Field label="Status"><Select value={f.status} onChange={e=>s('status',e.target.value)}>
+        <option value="pendente">⏳ Pendente</option>
+        <option value="em_andamento">🔧 Em andamento</option>
+        <option value="concluido">✅ Concluído</option>
+        <option value="cancelado">❌ Cancelado</option>
+      </Select></Field>
+      <Field label="Prazo"><Input type="date" value={f.due_date||''} onChange={e=>s('due_date',e.target.value||null)}/></Field>
+    </FormRow>
+    <FormRow>
+      <Field label="Atribuído a"><Select value={f.assigned_to||''} onChange={e=>s('assigned_to',e.target.value||null)}><option value="">— Ninguém —</option>{(profiles||[]).filter(p=>p.active).map(p=><option key={p.id} value={p.id}>{p.name||p.email}</option>)}</Select></Field>
+      <Field label="Custo estimado (R$)"><Input type="number" step="0.01" value={f.cost||''} onChange={e=>s('cost',e.target.value?parseFloat(e.target.value):null)}/></Field>
+    </FormRow>
+    <Field label="Observações"><Textarea value={f.notes||''} onChange={e=>s('notes',e.target.value)}/></Field>
+    <FormActions onSave={()=>{if(!f.title)return alert('Título obrigatório');onSave(f);}} onCancel={onCancel}/>
+  </>;
+}
+
+function OnlineServiceDetail({svc,pastures,profiles,user,onEdit,onDelete,onMarkDone,onReopen,onClose,statusInfo,priorityColor}){
+  const past=pastures.find(p=>p.id===svc.pasture_id);
+  const reportedBy=(profiles||[]).find(p=>p.id===svc.reported_by);
+  const assignedTo=(profiles||[]).find(p=>p.id===svc.assigned_to);
+  const completedBy=(profiles||[]).find(p=>p.id===svc.completed_by);
+  const si=statusInfo(svc.status);
+  const isOpen=['pendente','em_andamento'].includes(svc.status);
+
+  return <>
+    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12,padding:12,background:'#f9fafb',borderRadius:8}}>
+      <span style={{fontSize:28}}>{si.icon}</span>
+      <div style={{flex:1}}>
+        <Badge color={si.color}>{si.label}</Badge>
+        <span style={{marginLeft:6}}><Badge color={priorityColor(svc.priority)}>Prioridade: {svc.priority}</Badge></span>
+      </div>
+    </div>
+
+    {svc.description&&<div style={{marginBottom:12,padding:10,background:'#fffbeb',borderLeft:'3px solid #f59e0b',borderRadius:4,fontSize:13}}>
+      {svc.description}
+    </div>}
+
+    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,fontSize:13,marginBottom:12}}>
+      <Info label="Categoria" value={svc.category||'—'}/>
+      <Info label="Local" value={svc.location||past?.name||'—'}/>
+      <Info label="Pasto" value={past?.name||'—'}/>
+      <Info label="Prazo" value={svc.due_date?H.fmtDate(svc.due_date):'—'}/>
+      <Info label="Reportado por" value={reportedBy?.name||reportedBy?.email||'—'}/>
+      <Info label="Reportado em" value={svc.reported_at?H.fmtDate(svc.reported_at.split('T')[0]):'—'}/>
+      <Info label="Atribuído a" value={assignedTo?.name||assignedTo?.email||'—'}/>
+      <Info label="Custo estimado" value={svc.cost?H.fmtMoney(svc.cost):'—'}/>
+    </div>
+
+    {svc.status==='concluido'&&<div style={{marginBottom:12,padding:10,background:'#f0fdf4',borderLeft:'3px solid #16a34a',borderRadius:4,fontSize:13}}>
+      <p style={{fontWeight:600,marginBottom:4}}>✅ Concluído</p>
+      <p style={{fontSize:12}}>Por: {completedBy?.name||completedBy?.email||'—'}</p>
+      <p style={{fontSize:12}}>Em: {svc.completed_at?H.fmtDate(svc.completed_at.split('T')[0]):'—'}</p>
+      {svc.completion_notes&&<p style={{fontSize:12,marginTop:6,fontStyle:'italic'}}>"{svc.completion_notes}"</p>}
+    </div>}
+
+    {svc.notes&&<Info label="Observações" value={svc.notes}/>}
+
+    <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
+      {isOpen&&<Btn onClick={onMarkDone} style={{flex:1,minWidth:140}}>✅ Marcar concluído</Btn>}
+      {svc.status==='concluido'&&<Btn variant="secondary" onClick={onReopen} style={{flex:1,minWidth:140}}>↩ Reabrir</Btn>}
+      <Btn variant="secondary" onClick={onEdit}>Editar</Btn>
+      {user.role==='admin'&&<Btn variant="danger" onClick={onDelete}>Excluir</Btn>}
+      <Btn variant="ghost" onClick={onClose}>Fechar</Btn>
+    </div>
+  </>;
+}
+
 function App(){
   const[user,setUser]=useState(null);
   const[page,setPage]=useState('dashboard');
@@ -8211,6 +8925,7 @@ function App(){
       'online-herbicide':<OnlineHerbicide {...onlineProps}/>,
       'online-mineral':<OnlineMineral {...onlineProps}/>,
       'online-feces':<OnlineFeces {...onlineProps}/>,
+      'online-services':<OnlineServices {...onlineProps}/>,
       'online-exits':<OnlineExits {...onlineProps}/>,
       'online-revenues':<OnlineRevenues {...onlineProps}/>,
       'online-costs':<OnlineCosts {...onlineProps}/>,
@@ -8220,6 +8935,7 @@ function App(){
       'online-print':<OnlinePrintableSheets {...onlineProps}/>,
       'online-import':<OnlineExcelImport {...onlineProps}/>,
       'online-photo':<OnlinePhotoImport {...onlineProps}/>,
+      'online-gallery':<OnlineGallery {...onlineProps}/>,
       'online-collaborators':<OnlineCollaborators {...onlineProps}/>,
       'online-settings':<OnlineSettings {...onlineProps} onLogout={handleOnlineLogout}/>,
     };
