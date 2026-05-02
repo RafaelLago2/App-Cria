@@ -271,7 +271,7 @@ window.DB={
 
 /* ─── Helpers globais ─── */
 window.HELPERS={
-  today,
+  today:today(),
   fmtDate(d){if(!d)return'—';try{return new Date(d+'T12:00:00').toLocaleDateString('pt-BR');}catch{return d;}},
   fmtMoney(v){if(v==null||isNaN(v))return'—';return new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(v);},
   daysUntil(ds){if(!ds)return null;const n=new Date();n.setHours(12);return Math.ceil((new Date(ds+'T12:00:00')-n)/86400000);},
