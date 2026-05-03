@@ -2047,10 +2047,12 @@ function Settings({user}){
     localStorage.removeItem('pm_user');
     location.reload();
   }
-  function doBackup(){
+  async function doBackup(){
     try{
       const raw=localStorage.getItem('pm_data_v1');
-      const data=raw?JSON.parse(raw):DB.get('users'); // fallback
+      if(!raw){
+        if(!confirm('Não há dados salvos no localStorage deste navegador.\n\nProsseguir com backup vazio mesmo assim?'))return;
+      }
       const backup={
         _pm_backup:true,
         _version:'1.0',
@@ -2058,13 +2060,57 @@ function Settings({user}){
         _farm:s.farm_name||'Fazenda',
         data:JSON.parse(raw||'{}'),
       };
-      const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');
+      const json=JSON.stringify(backup,null,2);
+      const sizeKb=Math.round(json.length/1024);
       const fname='pecuaria-backup-'+(s.farm_name||'fazenda').replace(/[^a-z0-9]/gi,'_').toLowerCase()+'-'+new Date().toISOString().split('T')[0]+'.json';
-      a.href=url;a.download=fname;a.click();
-      setTimeout(()=>URL.revokeObjectURL(url),1500);
-    }catch(e){alert('Erro ao gerar backup: '+e.message);}
+
+      // MÉTODO 1: download via Blob + anchor anexado ao DOM
+      let downloaded=false;
+      try{
+        const blob=new Blob([json],{type:'application/json;charset=utf-8'});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');
+        a.href=url;
+        a.download=fname;
+        a.style.display='none';
+        document.body.appendChild(a);
+        a.click();
+        await new Promise(r=>setTimeout(r,200));
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        downloaded=true;
+        console.log('[backup] download via blob OK ('+sizeKb+' KB)');
+      }catch(e){
+        console.warn('[backup] blob falhou:',e);
+      }
+
+      // MÉTODO 2 (fallback): abrir em nova aba pra você salvar manualmente
+      if(!downloaded){
+        try{
+          const dataUrl='data:application/json;charset=utf-8,'+encodeURIComponent(json);
+          const w=window.open(dataUrl,'_blank');
+          if(!w){
+            // popup bloqueado: copiar pro clipboard
+            await navigator.clipboard.writeText(json);
+            alert('⚠ Não foi possível baixar automaticamente.\n\nO backup foi COPIADO PARA A ÁREA DE TRANSFERÊNCIA.\n\n1) Abra um editor de texto (Bloco de Notas)\n2) Cole (Ctrl+V)\n3) Salve com o nome:\n\n'+fname);
+          } else {
+            alert('⚠ Download direto bloqueado.\n\nAbri o backup numa nova aba. No menu do navegador clique em "Salvar página como..." e salve com o nome:\n\n'+fname);
+          }
+          downloaded=true;
+        }catch(e){
+          console.error('[backup] todos métodos falharam:',e);
+        }
+      }
+
+      if(downloaded){
+        alert('✅ Backup gerado!\n\n📁 Arquivo: '+fname+'\n📊 Tamanho: '+sizeKb+' KB');
+      } else {
+        alert('❌ Não foi possível salvar o backup.\n\nAbra o console (F12) pra ver detalhes do erro.');
+      }
+    }catch(e){
+      console.error('[backup] erro fatal:',e);
+      alert('❌ Erro ao gerar backup: '+e.message);
+    }
   }
   function handleRestore(e){
     const file=e.target.files[0];
@@ -5473,6 +5519,86 @@ function OnlineSettings({user,onLogout}){
       </div>
     </Card>
 
+    <Card style={{marginBottom:16}}>
+      <CardHeader title="💾 Backup do Banco" icon=""/>
+      <div style={{padding:16}}>
+        <Alert type="info">
+          📥 <strong>Salvar backup:</strong> baixa TODOS os dados do Supabase (todas as tabelas) em um arquivo JSON único.
+          <p style={{fontSize:11,color:'#6b7280',marginTop:4}}>Útil pra cópia de segurança, restaurar em outro Supabase, ou auditoria.</p>
+        </Alert>
+        <Btn fullWidth onClick={async()=>{
+          if(!confirm('Baixar backup completo do Supabase?\n\nTodas as tabelas em um arquivo JSON único.'))return;
+          const tables=['animals','pastures','lots','births','deaths','weighings',
+            'reproductive_protocols','pregnancy_diagnoses','health_managements',
+            'herbicide_applications','mineral_supplementations','feces_records',
+            'animal_exits','animal_lot_history','pasture_movements','services','revenues','costs','farm_settings'];
+          const backup={
+            _pm_backup:true,
+            _version:'2.0',
+            _source:'PecuariaManager Online',
+            _exported_at:new Date().toISOString(),
+            _exported_by:user.email,
+            _farm:s.farm_name||'Fazenda',
+            data:{},
+          };
+          let totalRecords=0;
+          const errors=[];
+          for(const t of tables){
+            try{
+              const rows=await window.SupaDB.get(t);
+              backup.data[t]=rows||[];
+              totalRecords+=(rows||[]).length;
+            }catch(e){
+              backup.data[t]=[];
+              errors.push(t);
+              console.warn('[backup '+t+']',e.message);
+            }
+          }
+          const json=JSON.stringify(backup,null,2);
+          const sizeKb=Math.round(json.length/1024);
+          const fname='pecuaria-backup-online-'+(s.farm_name||'fazenda').replace(/[^a-z0-9]/gi,'_').toLowerCase()+'-'+new Date().toISOString().split('T')[0]+'.json';
+
+          let downloaded=false;
+          try{
+            const blob=new Blob([json],{type:'application/json;charset=utf-8'});
+            const url=URL.createObjectURL(blob);
+            const a=document.createElement('a');
+            a.href=url;a.download=fname;a.style.display='none';
+            document.body.appendChild(a);
+            a.click();
+            await new Promise(r=>setTimeout(r,200));
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            downloaded=true;
+          }catch(e){console.warn('[backup] blob falhou:',e);}
+
+          if(!downloaded){
+            try{
+              const dataUrl='data:application/json;charset=utf-8,'+encodeURIComponent(json);
+              const w=window.open(dataUrl,'_blank');
+              if(!w){
+                await navigator.clipboard.writeText(json);
+                alert('⚠ Download bloqueado. Backup foi COPIADO PRA ÁREA DE TRANSFERÊNCIA.\n\nAbra o Bloco de Notas, cole (Ctrl+V) e salve com o nome:\n\n'+fname);
+              } else {
+                alert('⚠ Download bloqueado. Abri em nova aba.\n\nNo menu do navegador: "Salvar página como..." com o nome:\n\n'+fname);
+              }
+              downloaded=true;
+            }catch(e){console.error('[backup] tudo falhou:',e);}
+          }
+
+          if(downloaded){
+            let msg='✅ Backup gerado!\n\n';
+            msg+='📁 Arquivo: '+fname+'\n';
+            msg+='📊 '+tables.length+' tabelas · '+totalRecords+' registros · '+sizeKb+' KB';
+            if(errors.length>0){msg+='\n⚠ Erro em: '+errors.join(', ');}
+            alert(msg);
+          } else {
+            alert('❌ Não foi possível salvar. Veja console (F12).');
+          }
+        }}>📥 Salvar backup completo (JSON)</Btn>
+      </div>
+    </Card>
+
     <MigrationTool/>
 
     <Card>
@@ -6975,37 +7101,85 @@ function OnlinePregnancy({user}){
   }
 
   // Diagnóstico rápido: cria um registro de gestação direto
+  // Editar APENAS o parto previsto de uma fêmea prenha
+  async function editPartoPrevisto(female){
+    if(!female._lastDiag||female._lastDiag.result!=='Positivo')return;
+    const current=female._lastDiag.expected_birth_date;
+    const newDate=prompt(
+      '✏ Editar parto previsto — '+female.identifier+'\n\n'+
+      'Atual: '+(current?H.fmtDate(current):'(não informada)')+'\n\n'+
+      'Nova data (formato AAAA-MM-DD):',
+      current||''
+    );
+    if(newDate===null)return; // cancelou
+    if(!newDate.trim()){
+      // Limpar parto previsto
+      if(!confirm('Remover a data prevista do parto?'))return;
+      try{
+        await window.SupaDB.update('pregnancy_diagnoses',female._lastDiag.id,{expected_birth_date:null});
+        reload();
+      }catch(e){alert('Erro: '+e.message);}
+      return;
+    }
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(newDate.trim())){
+      alert('Data inválida. Use formato AAAA-MM-DD (ex: 2026-12-31)');
+      return;
+    }
+    try{
+      await window.SupaDB.update('pregnancy_diagnoses',female._lastDiag.id,{expected_birth_date:newDate.trim()});
+      reload();
+    }catch(e){alert('Erro: '+e.message);}
+  }
+
   async function quickDiagnose(female,result){
     try{
-      const protocol=protocols.find(p=>p.cow_id===female.identifier);
+      // Buscar TODOS os protocolos dessa vaca, do mais recente
+      const cowProtocols=protocols.filter(p=>p.cow_id===female.identifier);
+      const protocol=cowProtocols[0]; // mais recente (já está ordenado desc)
+
+      console.log('[quickDiagnose] Vaca:',female.identifier);
+      console.log('[quickDiagnose] Protocolos encontrados:',cowProtocols.length);
+      if(protocol)console.log('[quickDiagnose] Mais recente:',{date:protocol.date,repasse_date:protocol.repasse_date,bull:protocol.semen_bull});
+
       let expectedBirth=null;
       let notesAuto='';
 
       if(result==='Positivo'){
-        // Calcular parto previsto: prioridade IATF > repasse > diagnóstico
+        // Calcular parto previsto: USAR DATA DA IATF como padrão
+        // (se a vaca emprenhou do repasse, o usuário ajusta na hora)
         let baseDate=null;
         let baseLabel='';
-        if(protocol){
-          // Se tem repasse, usa data do repasse + 283
-          if(protocol.repasse_date){
-            baseDate=protocol.repasse_date;
-            baseLabel='repasse de '+H.fmtDate(protocol.repasse_date);
-          } else if(protocol.date){
-            baseDate=protocol.date;
-            baseLabel='IATF de '+H.fmtDate(protocol.date);
-          }
+
+        if(protocol&&protocol.date){
+          // Limpar timestamp se houver (vir do banco como '2025-10-06T00:00:00')
+          baseDate=String(protocol.date).split('T')[0];
+          baseLabel='IATF de '+H.fmtDate(baseDate);
         }
-        if(!baseDate){baseDate=TODAY;baseLabel='diagnóstico de hoje (sem protocolo)';}
+
+        if(!baseDate){
+          baseDate=TODAY;
+          baseLabel='diagnóstico de hoje (sem protocolo cadastrado)';
+        }
 
         // Pré-calcula
         const calculated=H.addDays(baseDate,283);
+        console.log('[quickDiagnose] Base:',baseDate,'+283 =',calculated);
+
+        // Sugestão extra se houve repasse
+        let extraInfo='';
+        if(protocol&&protocol.repasse_date){
+          const repasseDate=String(protocol.repasse_date).split('T')[0];
+          const repasseCalc=H.addDays(repasseDate,283);
+          extraInfo='\n\n📌 Houve REPASSE em '+H.fmtDate(repasseDate)+' — se a vaca emprenhou DO REPASSE (e não da IATF), use: '+repasseCalc;
+        }
 
         // Permite editar
         const userInput=prompt(
           '🟢 Marcar PRENHA — '+female.identifier+'\n\n'+
-          'Base do cálculo: '+baseLabel+'\n'+
-          'Parto previsto sugerido: '+H.fmtDate(calculated)+' (283 dias)\n\n'+
-          'Ajuste a data se necessário (formato AAAA-MM-DD) ou deixe a sugerida:',
+          'Base: '+baseLabel+'\n'+
+          'Parto previsto: '+H.fmtDate(calculated)+' (IATF + 283 dias)'+
+          extraInfo+'\n\n'+
+          'Confirme ou ajuste a data (formato AAAA-MM-DD):',
           calculated
         );
         if(userInput===null)return; // cancelou
@@ -7034,6 +7208,7 @@ function OnlinePregnancy({user}){
         result,
         expected_birth_date:expectedBirth,
         notes:obs||notesAuto,
+        season:H.activeSeason(),
       };
       const r=await window.SupaDB.insert('pregnancy_diagnoses',data);
       if(!r){throw new Error('Falha ao salvar');}
@@ -7160,6 +7335,8 @@ function OnlinePregnancy({user}){
                       style={{padding:'5px 10px',background:'#16a34a',color:'#fff',border:'none',borderRadius:6,cursor:'pointer',fontSize:11,fontWeight:600}}>🟢 Prenha</button>
                     <button onClick={()=>quickDiagnose(f,'Negativo')} title="Marcar vazia"
                       style={{padding:'5px 10px',background:'#dc2626',color:'#fff',border:'none',borderRadius:6,cursor:'pointer',fontSize:11,fontWeight:600}}>🔴 Vazia</button>
+                    {f._lastDiag&&f._lastDiag.result==='Positivo'&&<button onClick={()=>editPartoPrevisto(f)} title="Editar data prevista do parto"
+                      style={{padding:'5px 10px',background:'#fff',color:'#1e40af',border:'1px solid #93c5fd',borderRadius:6,cursor:'pointer',fontSize:11}}>✏ Parto</button>}
                     {f._lastDiag&&<button onClick={()=>clearDiagnosis(f)} title="Remover último diagnóstico (volta a sem diagnóstico)"
                       style={{padding:'5px 10px',background:'#fff',color:'#6b7280',border:'1px solid #d1d5db',borderRadius:6,cursor:'pointer',fontSize:11}}>↺ Limpar</button>}
                   </div>
