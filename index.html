@@ -279,6 +279,19 @@ window.HELPERS={
   addDays(ds,n){const d=new Date(ds+'T12:00:00');d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];},
   getSeason(ds){if(!ds)return null;const d=new Date(ds+'T12:00:00');const y=d.getFullYear();const m=d.getMonth();const sy=m>=6?y:y-1;return String(sy).slice(-2)+'/'+String(sy+1).slice(-2);},
   currentSeason(){return window.HELPERS.getSeason(today());},
+  // Safra ativa: usa a global (definida em Settings) se houver, senão calcula da data atual
+  activeSeason(){return window.CURRENT_SEASON||window.HELPERS.currentSeason();},
+  // Lista de opções de safra para forms (atual, 3 anteriores, 1 próxima)
+  seasonOptions(){
+    const cs=window.HELPERS.currentSeason();
+    const csYear=parseInt('20'+cs.split('/')[0]);
+    const arr=[];
+    for(let i=4;i>=-1;i--){
+      const y=csYear-i;
+      arr.push(String(y).slice(-2)+'/'+String(y+1).slice(-2));
+    }
+    return arr;
+  },
   listSeasons(recs){
     const s=new Set();
     recs.forEach(r=>{const f=r.birth_date||r.date||r.death_date||r.diagnosis_date||r.entry_date;if(f)s.add(window.HELPERS.getSeason(f));});
@@ -423,14 +436,34 @@ window.SupaDB={
     return data;
   },
 
+  // Lista de campos UUID conhecidos (foreign keys). Empty string -> null
+  _UUID_FIELDS:['lot_id','pasture_id','animal_id','cow_id','calf_id','mother_id','father_id','to_lot_id','from_lot_id','to_pasture_id','from_pasture_id','reported_by','assigned_to','completed_by','collaborator_id','user_id','protocol_id','death_id','birth_id','sale_id','exit_id','revenue_id','cost_id'],
+  _cleanRow(row){
+    if(!row||typeof row!=='object')return row;
+    const out={...row};
+    Object.keys(out).forEach(k=>{
+      // Converter strings vazias em null para campos UUID (e qualquer campo terminado em _id)
+      if(out[k]===''&&(k.endsWith('_id')||this._UUID_FIELDS.includes(k))){
+        out[k]=null;
+      }
+      // Datas vazias também viram null
+      if(out[k]===''&&(k.endsWith('_date')||k==='date')){
+        out[k]=null;
+      }
+    });
+    return out;
+  },
+
   async insert(table,row){
-    const{data,error}=await _sup().from(table).insert(row).select().single();
+    const cleanRow=this._cleanRow(row);
+    const{data,error}=await _sup().from(table).insert(cleanRow).select().single();
     if(error)throw error;
     return data;
   },
 
   async update(table,id,patch){
-    const{data,error}=await _sup().from(table).update(patch).eq('id',id).select().single();
+    const cleanPatch=this._cleanRow(patch);
+    const{data,error}=await _sup().from(table).update(cleanPatch).eq('id',id).select().single();
     if(error)throw error;
     return data;
   },
@@ -755,6 +788,28 @@ function Input(props){return <input style={INP} {...props}/>;}
 function Select({children,...props}){return <select style={{...INP,minHeight:38}} {...props}>{children}</select>;}
 function Textarea(props){return <textarea style={{...INP,resize:'vertical',minHeight:72}} rows={3} {...props}/>;}
 function FormRow({children}){return <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>{children}</div>;}
+
+/* Componente reutilizável para campo de safra com default e opções */
+function SeasonField({value,onChange,label='Safra',hint='',required}){
+  const opts=H.seasonOptions();
+  const current=H.activeSeason();
+  return <Field label={label} required={required} hint={hint||'Default: '+current+' (definida nas Configurações)'}>
+    <Select value={value||current} onChange={e=>onChange(e.target.value)}>
+      {opts.map(s=><option key={s} value={s}>{s}{s===current?' (atual)':''}</option>)}
+    </Select>
+  </Field>;
+}
+
+/* Filtro de safra reutilizável para listas */
+function SeasonFilter({value,onChange,allLabel='Todas as safras'}){
+  const opts=H.seasonOptions();
+  const current=H.activeSeason();
+  return <Select value={value||'all'} onChange={e=>onChange(e.target.value)}>
+    <option value="all">{allLabel}</option>
+    <option value={current}>📅 Safra atual ({current})</option>
+    {opts.filter(s=>s!==current).map(s=><option key={s} value={s}>{s}</option>)}
+  </Select>;
+}
 function FormActions({onSave,onCancel,saveLabel='Salvar'}){
   return <div style={{display:'flex',gap:10,marginTop:16,paddingTop:16,borderTop:'1px solid #f3f4f6'}}>
     <Btn onClick={onSave} style={{flex:1}}>{saveLabel}</Btn>
@@ -5349,13 +5404,23 @@ function EditUserForm({user,onSave,onCancel}){
 /* ─── Tela de Configurações no modo online (resumida) ─── */
 function OnlineSettings({user,onLogout}){
   if(user.role!=='admin')return <div style={{padding:32,textAlign:'center'}}><div style={{fontSize:48}}>🔒</div><p style={{color:'#6b7280',marginTop:12}}>Acesso restrito</p></div>;
-  const[s,setS]=useState({farm_name:'',birth_alert_days:30});
+  const[s,setS]=useState({farm_name:'',birth_alert_days:30,current_season:''});
   const[loading,setLoading]=useState(true);
   const[saved,setSaved]=useState(false);
 
   useEffect(()=>{
     (async()=>{
-      try{const cfg=await window.SupaDB.getSettings();setS(cfg||{farm_name:'',birth_alert_days:30});}
+      try{
+        const cfg=await window.SupaDB.getSettings();
+        const current=cfg?.current_season||H.currentSeason();
+        setS({farm_name:cfg?.farm_name||'',birth_alert_days:cfg?.birth_alert_days||30,current_season:current});
+        // Se nunca teve safra salva, salva já a atual pra disponibilizar globalmente
+        if(!cfg?.current_season){
+          window.CURRENT_SEASON=current;
+        } else {
+          window.CURRENT_SEASON=cfg.current_season;
+        }
+      }
       catch(e){console.error(e);}
       finally{setLoading(false);}
     })();
@@ -5363,12 +5428,26 @@ function OnlineSettings({user,onLogout}){
 
   async function save(){
     try{
-      await window.SupaDB.updateSettings({farm_name:s.farm_name,birth_alert_days:parseInt(s.birth_alert_days)||30});
+      await window.SupaDB.updateSettings({
+        farm_name:s.farm_name,
+        birth_alert_days:parseInt(s.birth_alert_days)||30,
+        current_season:s.current_season,
+      });
+      window.CURRENT_SEASON=s.current_season; // atualiza global
       setSaved(true);setTimeout(()=>setSaved(false),2000);
     }catch(e){alert('Erro: '+e.message);}
   }
 
   if(loading)return <div style={{padding:32}}><EmptyState text="Carregando..."/></div>;
+
+  // Lista de safras possíveis (atual + 3 atrás + 1 frente)
+  const cs=H.currentSeason();
+  const csYear=parseInt('20'+cs.split('/')[0]);
+  const seasonOptions=[];
+  for(let i=4;i>=-1;i--){
+    const y=csYear-i;
+    seasonOptions.push(String(y).slice(-2)+'/'+String(y+1).slice(-2));
+  }
 
   return <div style={{padding:16,paddingBottom:100}}>
     <PageHeader title="⚙️ Configurações (online)"/>
@@ -5378,7 +5457,18 @@ function OnlineSettings({user,onLogout}){
       <div style={{padding:16}}>
         <Field label="Nome da Fazenda"><Input value={s.farm_name||''} onChange={e=>setS({...s,farm_name:e.target.value})}/></Field>
         <Field label="Dias de alerta antes do parto"><Input type="number" value={s.birth_alert_days||30} onChange={e=>setS({...s,birth_alert_days:e.target.value})} min={1} max={90}/></Field>
-        {saved&&<Alert type="success">Configurações salvas!</Alert>}
+
+        <Field label="Safra atual" hint="Esta safra será o padrão em todos os novos cadastros (nascimentos, inseminações, receitas, custos, etc).">
+          <Select value={s.current_season||cs} onChange={e=>setS({...s,current_season:e.target.value})}>
+            {seasonOptions.map(sea=><option key={sea} value={sea}>{sea}{sea===cs?' (sugerida pela data atual)':''}</option>)}
+          </Select>
+        </Field>
+
+        <Alert type="info" style={{marginTop:8,marginBottom:8}}>
+          📅 <strong>Como funciona a safra:</strong> No Brasil, a safra pecuária vai de <strong>julho a junho</strong>. Por exemplo, "25/26" começou em jul/2025 e termina em jun/2026. Cada cadastro novo entra na safra que estiver definida aqui — você pode mudar a qualquer momento (ex: vira safra nova em julho).
+        </Alert>
+
+        {saved&&<Alert type="success">✅ Configurações salvas!</Alert>}
         <Btn onClick={save} fullWidth>Salvar</Btn>
       </div>
     </Card>
@@ -6139,6 +6229,7 @@ function OnlineBirths({user}){
   const[showForm,setShowForm]=useState(false);
   const[editing,setEditing]=useState(null);
   const[query,setQuery]=useState('');
+  const[seasonFilter,setSeasonFilter]=useState('all');
 
   async function save(data){
     try{
@@ -6180,11 +6271,23 @@ function OnlineBirths({user}){
     catch(e){alert('Erro: '+e.message);}
   }
 
-  const filtered=query?items.filter(b=>(b.calf_id+' '+b.mother_id).toLowerCase().includes(query.toLowerCase())):items;
+  const filtered=useMemo(()=>{
+    let r=items;
+    if(seasonFilter!=='all'){
+      r=r.filter(b=>(b.season||H.getSeason(b.birth_date))===seasonFilter);
+    }
+    if(query){
+      r=r.filter(b=>(b.calf_id+' '+b.mother_id).toLowerCase().includes(query.toLowerCase()));
+    }
+    return r;
+  },[items,query,seasonFilter]);
 
-  return <OnlinePage title="Nascimentos" subtitle={items.length+' registros'} icon="🐮" loading={loading} error={error}
+  return <OnlinePage title="Nascimentos" subtitle={items.length+' registros · '+filtered.length+' visíveis'} icon="🐮" loading={loading} error={error}
     action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
-    <div style={{marginBottom:12}}><Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar..."/></div>
+    <FormRow>
+      <Field label="🔎 Buscar"><Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="ID do bezerro ou da mãe"/></Field>
+      <Field label="📅 Safra"><SeasonFilter value={seasonFilter} onChange={setSeasonFilter}/></Field>
+    </FormRow>
     <Card>
       {filtered.length===0?<EmptyState icon="🐮" text="Sem nascimentos"/>:
         filtered.map(b=><ListItem key={b.id} onClick={()=>{setEditing(b);setShowForm(true);}}>
@@ -6209,7 +6312,7 @@ function OnlineBirths({user}){
 }
 
 function OnlineBirthForm({initial,lots,pastures,onSave,onCancel}){
-  const[f,setF]=useState({mother_id:'',mother_race:'Nelore',calf_id:'',calf_race:'Nelore',calf_sex:'Macho',birth_weight:'',birth_date:TODAY,pasture_id:'',lot_id:'',bull_name:'',bull_race:'',farm_tag:'',official_tag:'',medications:'Cura de umbigo',notes:'',...initial});
+  const[f,setF]=useState({mother_id:'',mother_race:'Nelore',calf_id:'',calf_race:'Nelore',calf_sex:'Macho',birth_weight:'',birth_date:TODAY,pasture_id:'',lot_id:'',bull_name:'',bull_race:'',farm_tag:'',official_tag:'',medications:'Cura de umbigo',notes:'',season:H.activeSeason(),...initial});
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   function pickMother(id,a){const upd={mother_id:id};if(a){upd.mother_race=a.race||f.mother_race;if(a.lot_id&&!f.lot_id)upd.lot_id=a.lot_id;}setF(p=>({...p,...upd}));}
   return <>
@@ -6224,7 +6327,10 @@ function OnlineBirthForm({initial,lots,pastures,onSave,onCancel}){
       <Field label="Sexo"><Select value={f.calf_sex} onChange={e=>s('calf_sex',e.target.value)}><option>Macho</option><option>Fêmea</option></Select></Field>
       <Field label="Peso (kg)" required><Input type="number" step="0.1" value={f.birth_weight||''} onChange={e=>s('birth_weight',parseFloat(e.target.value)||null)}/></Field>
     </FormRow>
-    <Field label="Data" required><Input type="date" value={f.birth_date} onChange={e=>s('birth_date',e.target.value)}/></Field>
+    <FormRow>
+      <Field label="Data" required><Input type="date" value={f.birth_date} onChange={e=>s('birth_date',e.target.value)}/></Field>
+      <SeasonField value={f.season} onChange={v=>s('season',v)}/>
+    </FormRow>
     <FormRow>
       <Field label="Pasto"><Select value={f.pasture_id||''} onChange={e=>s('pasture_id',e.target.value||null)}><option value="">—</option>{pastures.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select></Field>
       <Field label="Lote"><Select value={f.lot_id||''} onChange={e=>s('lot_id',e.target.value||null)}><option value="">—</option>{lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
@@ -6423,8 +6529,11 @@ function OnlineReproductive({user}){
   const{data:animals}=useSupaQuery('animals');
   const[showForm,setShowForm]=useState(false);
   const[editing,setEditing]=useState(null);
-  const[viewMode,setViewMode]=useState('animal'); // 'animal' | 'lot'
+  const[viewMode,setViewMode]=useState('animal'); // 'animal' | 'lot' | 'race'
   const[query,setQuery]=useState('');
+  const[filterRace,setFilterRace]=useState('all');
+  const[seasonFilter,setSeasonFilter]=useState('all');
+  const[bulkMode,setBulkMode]=useState(false);
 
   async function save(data){
     try{
@@ -6440,30 +6549,81 @@ function OnlineReproductive({user}){
     catch(e){alert('Erro: '+e.message);}
   }
 
-  // Filtrar por busca
+  // Estatísticas por raça (IATF + repasse)
+  const raceStats=useMemo(()=>{
+    const stats={};
+    items.forEach(p=>{
+      // Touro IATF
+      if(p.bull_race){
+        const key=p.bull_race;
+        if(!stats[key])stats[key]={iatf:0,repasse:0,total:0,bulls:new Set()};
+        stats[key].iatf++;
+        stats[key].total++;
+        if(p.semen_bull)stats[key].bulls.add(p.semen_bull);
+      }
+      // Touro de repasse
+      if(p.repasse_race){
+        const key=p.repasse_race;
+        if(!stats[key])stats[key]={iatf:0,repasse:0,total:0,bulls:new Set()};
+        stats[key].repasse++;
+        if(!p.bull_race||p.bull_race!==p.repasse_race)stats[key].total++;
+        if(p.repasse_bull)stats[key].bulls.add(p.repasse_bull);
+      }
+    });
+    // Converter Set em array
+    Object.keys(stats).forEach(k=>{stats[k].bulls=[...stats[k].bulls];});
+    return stats;
+  },[items]);
+
+  // Filtrar por busca + raça + safra
   const filtered=useMemo(()=>{
-    if(!query)return items;
-    const q=query.toLowerCase();
-    return items.filter(p=>(p.cow_id||'').toLowerCase().includes(q)||(p.semen_bull||'').toLowerCase().includes(q));
-  },[items,query]);
+    let r=items;
+    if(seasonFilter!=='all'){
+      r=r.filter(p=>(p.season||H.getSeason(p.date))===seasonFilter);
+    }
+    if(filterRace!=='all'){
+      r=r.filter(p=>p.bull_race===filterRace||p.repasse_race===filterRace);
+    }
+    if(query){
+      const q=query.toLowerCase();
+      r=r.filter(p=>(p.cow_id||'').toLowerCase().includes(q)||(p.semen_bull||'').toLowerCase().includes(q)||(p.repasse_bull||'').toLowerCase().includes(q));
+    }
+    return r;
+  },[items,query,filterRace,seasonFilter]);
+
+  // Ícone por raça
+  function raceIcon(race){
+    return{Nelore:'🐃',Angus:'🐂',Hereford:'🐄',Braford:'🐮',Brangus:'🐂',Wagyu:'🥩'}[race]||'🐄';
+  }
+  function raceColor(race){
+    return{Nelore:'#a16207',Angus:'#1f2937',Hereford:'#b91c1c',Braford:'#9a3412',Brangus:'#451a03',Wagyu:'#7c2d12'}[race]||'#6b7280';
+  }
 
   // Agrupar por modo
   const grouped=useMemo(()=>{
     if(viewMode==='animal'){
-      // Ordenar por número crescente
       return [...filtered].sort((a,b)=>(a.cow_id||'').localeCompare(b.cow_id||'',undefined,{numeric:true,sensitivity:'base'}));
-    } else {
-      // Agrupar por lote
+    } else if(viewMode==='lot'){
       const g={};
       filtered.forEach(p=>{
-        // Tenta usar lot_id; se não tiver, busca pelo animal
         let lotId=p.lot_id;
         if(!lotId){const a=animals.find(x=>x.identifier===p.cow_id);lotId=a?.lot_id;}
         const key=lotId||'__no_lot__';
         if(!g[key])g[key]=[];
         g[key].push(p);
       });
-      // Ordenar dentro de cada lote
+      Object.keys(g).forEach(k=>{
+        g[k].sort((a,b)=>(a.cow_id||'').localeCompare(b.cow_id||'',undefined,{numeric:true,sensitivity:'base'}));
+      });
+      return g;
+    } else {
+      // Por raça do touro IATF
+      const g={};
+      filtered.forEach(p=>{
+        const key=p.bull_race||'(sem raça)';
+        if(!g[key])g[key]=[];
+        g[key].push(p);
+      });
       Object.keys(g).forEach(k=>{
         g[k].sort((a,b)=>(a.cow_id||'').localeCompare(b.cow_id||'',undefined,{numeric:true,sensitivity:'base'}));
       });
@@ -6471,16 +6631,54 @@ function OnlineReproductive({user}){
     }
   },[filtered,viewMode,animals]);
 
+  const racesList=Object.keys(raceStats).sort();
+
   return <OnlinePage title="Reprodução" subtitle={items.length+' protocolos'} icon="🔬" loading={loading} error={error}
-    action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>}>
+    action={<div style={{display:'flex',gap:6}}>
+      <Btn variant="secondary" size="sm" onClick={()=>setBulkMode(true)}>📋 Em lote</Btn>
+      <Btn size="sm" onClick={()=>{setEditing(null);setShowForm(true);}}>+ Novo</Btn>
+    </div>}>
+
+    {/* Cards de estatística por raça */}
+    {racesList.length>0&&<div style={{marginBottom:14}}>
+      <p style={{fontSize:11,fontWeight:600,color:'#6b7280',textTransform:'uppercase',marginBottom:8}}>Inseminações por raça do touro</p>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:8}}>
+        {racesList.map(race=>{
+          const s=raceStats[race];
+          const active=filterRace===race;
+          return <button key={race} onClick={()=>setFilterRace(active?'all':race)} style={{
+            padding:'10px 12px',
+            background:active?raceColor(race):'#fff',
+            color:active?'#fff':'#111827',
+            border:'2px solid '+raceColor(race),
+            borderRadius:10,
+            cursor:'pointer',
+            textAlign:'left',
+          }}>
+            <div style={{fontSize:22,marginBottom:2}}>{raceIcon(race)}</div>
+            <div style={{fontSize:12,fontWeight:700}}>{race}</div>
+            <div style={{fontSize:10,opacity:.85,marginTop:2}}>{s.total} inseminações</div>
+            <div style={{fontSize:9,opacity:.7,marginTop:1}}>{s.bulls.length} touro(s) usado(s)</div>
+          </button>;
+        })}
+      </div>
+      {filterRace!=='all'&&<div style={{marginTop:8,fontSize:11,color:'#1e40af'}}>
+        🔬 Filtrando por raça: <strong>{filterRace}</strong>
+        <button onClick={()=>setFilterRace('all')} style={{marginLeft:8,padding:'2px 8px',fontSize:10,background:'#fff',border:'1px solid #d1d5db',borderRadius:6,cursor:'pointer'}}>× limpar filtro</button>
+      </div>}
+    </div>}
 
     {/* Modo de visualização */}
     <div style={{display:'flex',gap:4,marginBottom:12,background:'#f3f4f6',padding:4,borderRadius:10}}>
       <button onClick={()=>setViewMode('animal')} style={{flex:1,padding:8,background:viewMode==='animal'?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:viewMode==='animal'?600:400,color:viewMode==='animal'?'#1e40af':'#6b7280'}}>🐄 Por animal</button>
       <button onClick={()=>setViewMode('lot')} style={{flex:1,padding:8,background:viewMode==='lot'?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:viewMode==='lot'?600:400,color:viewMode==='lot'?'#1e40af':'#6b7280'}}>🐂 Por lote</button>
+      <button onClick={()=>setViewMode('race')} style={{flex:1,padding:8,background:viewMode==='race'?'#fff':'transparent',border:'none',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:viewMode==='race'?600:400,color:viewMode==='race'?'#1e40af':'#6b7280'}}>🧬 Por raça</button>
     </div>
 
-    <Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar por animal ou touro..." style={{marginBottom:12}}/>
+    <FormRow>
+      <Field label="🔎 Buscar"><Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Animal ou touro..."/></Field>
+      <Field label="📅 Safra"><SeasonFilter value={seasonFilter} onChange={setSeasonFilter}/></Field>
+    </FormRow>
 
     {viewMode==='animal'?
       <Card>
@@ -6489,14 +6687,17 @@ function OnlineReproductive({user}){
             <div style={{display:'flex',justifyContent:'space-between'}}>
               <div>
                 <strong style={{fontSize:13}}>{p.cow_id}</strong> — {p.protocol_name}
-                <p style={{fontSize:11,color:'#6b7280'}}>{p.semen_bull||'—'} · {H.fmtDate(p.date)}</p>
+                <p style={{fontSize:11,color:'#6b7280'}}>
+                  {p.bull_race&&<span style={{marginRight:4}}>{raceIcon(p.bull_race)}</span>}
+                  {p.semen_bull||'—'} {p.bull_race?'('+p.bull_race+')':''} · {H.fmtDate(p.date)}
+                </p>
               </div>
               {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(p.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
             </div>
           </ListItem>)
         }
       </Card>
-    :
+    : viewMode==='lot'?
       <>
         {Object.keys(grouped).length===0?<EmptyState icon="🔬" text="Sem protocolos"/>:
           Object.entries(grouped).sort((a,b)=>{
@@ -6511,7 +6712,29 @@ function OnlineReproductive({user}){
                 <div style={{display:'flex',justifyContent:'space-between'}}>
                   <div>
                     <strong style={{fontSize:13}}>{p.cow_id}</strong> — {p.protocol_name}
-                    <p style={{fontSize:11,color:'#6b7280'}}>{p.semen_bull||'—'} · {H.fmtDate(p.date)}</p>
+                    <p style={{fontSize:11,color:'#6b7280'}}>
+                      {p.bull_race&&<span style={{marginRight:4}}>{raceIcon(p.bull_race)}</span>}
+                      {p.semen_bull||'—'} · {H.fmtDate(p.date)}
+                    </p>
+                  </div>
+                  {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(p.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
+                </div>
+              </ListItem>)}
+            </Card>;
+          })
+        }
+      </>
+    :
+      <>
+        {Object.keys(grouped).length===0?<EmptyState icon="🔬" text="Sem protocolos"/>:
+          Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0])).map(([race,protocols])=>{
+            return <Card key={race} style={{marginBottom:12,borderLeft:'4px solid '+raceColor(race)}}>
+              <CardHeader title={raceIcon(race)+' '+race} action={<Badge color="purple">{protocols.length}</Badge>}/>
+              {protocols.map(p=><ListItem key={p.id} onClick={()=>{setEditing(p);setShowForm(true);}}>
+                <div style={{display:'flex',justifyContent:'space-between'}}>
+                  <div>
+                    <strong style={{fontSize:13}}>{p.cow_id}</strong> — {p.semen_bull||'(touro não informado)'}
+                    <p style={{fontSize:11,color:'#6b7280'}}>{p.protocol_name} · {H.fmtDate(p.date)}</p>
                   </div>
                   {user.role==='admin'&&<button onClick={e=>{e.stopPropagation();del(p.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>}
                 </div>
@@ -6525,11 +6748,164 @@ function OnlineReproductive({user}){
     <Modal open={showForm} onClose={()=>{setShowForm(false);setEditing(null);}} title={editing?'Editar':'Novo Protocolo'} size="lg">
       <OnlineProtocolForm initial={editing} lots={lots} onSave={save} onCancel={()=>{setShowForm(false);setEditing(null);}}/>
     </Modal>
+
+    <Modal open={bulkMode} onClose={()=>setBulkMode(false)} title="📋 Inseminação em Lote" size="lg">
+      <OnlineBulkProtocol lots={lots} animals={animals} onClose={()=>{setBulkMode(false);reload();}}/>
+    </Modal>
   </OnlinePage>;
 }
 
+/* ─── INSEMINAÇÃO EM LOTE: cadastro rápido de várias vacas de uma vez ─── */
+function OnlineBulkProtocol({lots,animals,onClose}){
+  const[selectedLot,setSelectedLot]=useState('');
+  const[date,setDate]=useState(TODAY);
+  const[season,setSeason]=useState(H.activeSeason());
+  const[protocolName,setProtocolName]=useState('IATF');
+  const[semenBull,setSemenBull]=useState('');
+  const[bullRace,setBullRace]=useState('Nelore');
+  const[repasseDate,setRepasseDate]=useState('');
+  const[repasseBull,setRepasseBull]=useState('');
+  const[repasseRace,setRepasseRace]=useState('');
+  const[selectedAnimals,setSelectedAnimals]=useState({});
+  const[saving,setSaving]=useState(false);
+  const[result,setResult]=useState(null);
+
+  // Listar fêmeas reprodutivas do lote selecionado, ordenadas
+  const animalsInLot=useMemo(()=>{
+    if(!selectedLot)return [];
+    return animals
+      .filter(a=>a.lot_id===selectedLot&&a.sex==='Fêmea'&&['Vaca','Novilha'].includes(a.type)&&(a.status||'ativo')==='ativo')
+      .sort((a,b)=>(a.identifier||'').localeCompare(b.identifier||'',undefined,{numeric:true,sensitivity:'base'}));
+  },[selectedLot,animals]);
+
+  function toggleAnimal(id){
+    setSelectedAnimals(p=>{
+      const n={...p};
+      if(n[id])delete n[id]; else n[id]=true;
+      return n;
+    });
+  }
+  function selectAll(){
+    const all={};animalsInLot.forEach(a=>{all[a.id]=true;});
+    setSelectedAnimals(all);
+  }
+  function selectNone(){setSelectedAnimals({});}
+
+  async function saveAll(){
+    if(!selectedLot){alert('Selecione o lote');return;}
+    if(!semenBull){alert('Informe o touro IATF');return;}
+    const ids=Object.keys(selectedAnimals);
+    if(ids.length===0){alert('Selecione ao menos 1 vaca');return;}
+    if(!confirm('Cadastrar inseminação para '+ids.length+' fêmea(s)?\n\nTouro: '+semenBull+' ('+bullRace+')\nProtocolo: '+protocolName+'\nData: '+H.fmtDate(date)))return;
+
+    setSaving(true);
+    const ok=[];const errs=[];
+    for(const id of ids){
+      const animal=animalsInLot.find(a=>a.id===id);
+      if(!animal){errs.push({id,error:'animal não encontrado'});continue;}
+      try{
+        await window.SupaDB.insert('reproductive_protocols',{
+          cow_id:animal.identifier,
+          lot_id:selectedLot,
+          date,
+          season,
+          protocol_name:protocolName,
+          semen_bull:semenBull,
+          bull_race:bullRace,
+          repasse_date:repasseDate||null,
+          repasse_bull:repasseBull||null,
+          repasse_race:repasseRace||null,
+          notes:'Cadastro em lote',
+        });
+        ok.push(animal.identifier);
+      }catch(e){errs.push({id:animal.identifier,error:e.message});}
+    }
+    setResult({ok,errs});
+    setSaving(false);
+  }
+
+  if(result){
+    return <>
+      <Alert type={result.errs.length===0?'success':'warning'}>
+        ✅ <strong>{result.ok.length} inseminações cadastradas</strong>
+        {result.errs.length>0&&<><br/>⚠ {result.errs.length} erros (ver console)</>}
+      </Alert>
+      {result.errs.length>0&&<div style={{maxHeight:200,overflowY:'auto',fontSize:12,marginBottom:12}}>
+        {result.errs.map((e,i)=><div key={i}>• <strong>{e.id}:</strong> {e.error}</div>)}
+      </div>}
+      <Btn fullWidth onClick={onClose}>Fechar</Btn>
+    </>;
+  }
+
+  const numSelected=Object.keys(selectedAnimals).length;
+
+  return <>
+    <Alert type="info">📋 <strong>Cadastro rápido:</strong> escolha o lote, defina os dados do protocolo (válidos pra todas), e selecione as fêmeas. Tudo é cadastrado de uma vez.</Alert>
+
+    <Field label="Lote" required><Select value={selectedLot} onChange={e=>{setSelectedLot(e.target.value);setSelectedAnimals({});}}>
+      <option value="">— Selecione —</option>
+      {lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
+    </Select></Field>
+
+    <FormRow>
+      <Field label="Data IATF" required><Input type="date" value={date} onChange={e=>setDate(e.target.value)}/></Field>
+      <SeasonField value={season} onChange={setSeason}/>
+    </FormRow>
+
+    <FormRow>
+      <Field label="Protocolo"><Select value={protocolName} onChange={e=>setProtocolName(e.target.value)}>
+        <option>IATF</option><option>Monta Natural</option><option>Repasse</option><option>Outro</option>
+      </Select></Field>
+      <Field label="Touro / Sêmen" required><Input value={semenBull} onChange={e=>setSemenBull(e.target.value)} placeholder="Ex: Wilks No Substitute 2358"/></Field>
+    </FormRow>
+
+    <Field label="Raça do touro" required><Select value={bullRace} onChange={e=>setBullRace(e.target.value)}>{H.RACES.map(r=><option key={r}>{r}</option>)}</Select></Field>
+
+    <details style={{marginBottom:12,padding:8,background:'#fffbeb',borderRadius:8}}>
+      <summary style={{cursor:'pointer',fontWeight:600,fontSize:13}}>🐂 Repasse (opcional)</summary>
+      <div style={{paddingTop:8}}>
+        <FormRow>
+          <Field label="Data repasse"><Input type="date" value={repasseDate} onChange={e=>setRepasseDate(e.target.value)}/></Field>
+          <Field label="Touro repasse"><Input value={repasseBull} onChange={e=>setRepasseBull(e.target.value)}/></Field>
+        </FormRow>
+        <Field label="Raça repasse"><Select value={repasseRace} onChange={e=>setRepasseRace(e.target.value)}>
+          <option value="">—</option>{H.RACES.map(r=><option key={r}>{r}</option>)}
+        </Select></Field>
+      </div>
+    </details>
+
+    {selectedLot&&<>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+        <strong style={{fontSize:13}}>Selecione as fêmeas: {numSelected}/{animalsInLot.length}</strong>
+        <div style={{display:'flex',gap:6}}>
+          <button onClick={selectAll} style={{padding:'4px 8px',fontSize:11,background:'#dbeafe',border:'1px solid #93c5fd',borderRadius:6,cursor:'pointer'}}>Todas</button>
+          <button onClick={selectNone} style={{padding:'4px 8px',fontSize:11,background:'#fff',border:'1px solid #d1d5db',borderRadius:6,cursor:'pointer'}}>Nenhuma</button>
+        </div>
+      </div>
+      <div style={{maxHeight:300,overflowY:'auto',border:'1px solid #e5e7eb',borderRadius:8,marginBottom:12}}>
+        {animalsInLot.length===0?<div style={{padding:16,textAlign:'center',color:'#6b7280',fontSize:12}}>Nenhuma fêmea reprodutiva neste lote</div>:
+          animalsInLot.map(a=>{
+            const sel=!!selectedAnimals[a.id];
+            return <div key={a.id} onClick={()=>toggleAnimal(a.id)} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',borderBottom:'1px solid #f3f4f6',background:sel?'#dcfce7':'#fff',cursor:'pointer'}}>
+              <input type="checkbox" checked={sel} onChange={()=>{}} style={{width:18,height:18}}/>
+              <strong style={{fontSize:13,flex:1}}>{a.identifier}</strong>
+              <span style={{fontSize:11,color:'#6b7280'}}>{a.type} · {a.race}</span>
+            </div>;
+          })
+        }
+      </div>
+    </>}
+
+    <FormActions
+      onSave={saveAll}
+      onCancel={onClose}
+      saveLabel={saving?'⏳ Salvando...':'💾 Cadastrar '+numSelected+' '+(numSelected===1?'inseminação':'inseminações')}
+    />
+  </>;
+}
+
 function OnlineProtocolForm({initial,lots,onSave,onCancel}){
-  const[f,setF]=useState({cow_id:'',lot_id:'',date:TODAY,protocol_name:'IATF',semen_bull:'',bull_race:'',repasse_date:'',repasse_bull:'',notes:'',...initial});
+  const[f,setF]=useState({cow_id:'',lot_id:'',date:TODAY,protocol_name:'IATF',semen_bull:'',bull_race:'',repasse_date:'',repasse_bull:'',repasse_race:'',notes:'',season:H.activeSeason(),...initial});
   const[selectedAnimal,setSelectedAnimal]=useState(null);
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   function pickCow(id,a){
@@ -6551,16 +6927,19 @@ function OnlineProtocolForm({initial,lots,onSave,onCancel}){
 
     <FormRow>
       <Field label="Data" required><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
-      <Field label="Protocolo"><Input value={f.protocol_name||''} onChange={e=>s('protocol_name',e.target.value)} placeholder="IATF"/></Field>
+      <SeasonField value={f.season} onChange={v=>s('season',v)}/>
     </FormRow>
     <FormRow>
+      <Field label="Protocolo"><Input value={f.protocol_name||''} onChange={e=>s('protocol_name',e.target.value)} placeholder="IATF"/></Field>
       <Field label="Touro/Sêmen"><Input value={f.semen_bull||''} onChange={e=>s('semen_bull',e.target.value)}/></Field>
-      <Field label="Raça do Touro"><Select value={f.bull_race||''} onChange={e=>s('bull_race',e.target.value)}><option value="">—</option>{H.RACES.map(r=><option key={r}>{r}</option>)}</Select></Field>
     </FormRow>
+    <Field label="Raça do Touro"><Select value={f.bull_race||''} onChange={e=>s('bull_race',e.target.value)}><option value="">—</option>{H.RACES.map(r=><option key={r}>{r}</option>)}</Select></Field>
+    <p style={{fontSize:11,color:'#6b7280',marginBottom:6,marginTop:4,fontWeight:600}}>Repasse (opcional):</p>
     <FormRow>
       <Field label="Data Repasse"><Input type="date" value={f.repasse_date||''} onChange={e=>s('repasse_date',e.target.value||null)}/></Field>
       <Field label="Touro Repasse"><Input value={f.repasse_bull||''} onChange={e=>s('repasse_bull',e.target.value)}/></Field>
     </FormRow>
+    <Field label="Raça do Touro Repasse"><Select value={f.repasse_race||''} onChange={e=>s('repasse_race',e.target.value)}><option value="">—</option>{H.RACES.map(r=><option key={r}>{r}</option>)}</Select></Field>
     <Field label="Observações"><Textarea value={f.notes||''} onChange={e=>s('notes',e.target.value)}/></Field>
     <FormActions onSave={()=>{if(!f.cow_id)return alert('Selecione a vaca no Inventário');onSave(f);}} onCancel={onCancel}/>
   </>;
@@ -6578,6 +6957,7 @@ function OnlinePregnancy({user}){
   const[viewMode,setViewMode]=useState('females'); // 'females' | 'history'
   const[filterStatus,setFilterStatus]=useState('all'); // all | prenha | vazia | sem
   const[filterLot,setFilterLot]=useState('');
+  const[seasonFilter,setSeasonFilter]=useState('all');
   const[query,setQuery]=useState('');
 
   async function save(data){
@@ -6598,23 +6978,80 @@ function OnlinePregnancy({user}){
   async function quickDiagnose(female,result){
     try{
       const protocol=protocols.find(p=>p.cow_id===female.identifier);
+      let expectedBirth=null;
+      let notesAuto='';
+
+      if(result==='Positivo'){
+        // Calcular parto previsto: prioridade IATF > repasse > diagnóstico
+        let baseDate=null;
+        let baseLabel='';
+        if(protocol){
+          // Se tem repasse, usa data do repasse + 283
+          if(protocol.repasse_date){
+            baseDate=protocol.repasse_date;
+            baseLabel='repasse de '+H.fmtDate(protocol.repasse_date);
+          } else if(protocol.date){
+            baseDate=protocol.date;
+            baseLabel='IATF de '+H.fmtDate(protocol.date);
+          }
+        }
+        if(!baseDate){baseDate=TODAY;baseLabel='diagnóstico de hoje (sem protocolo)';}
+
+        // Pré-calcula
+        const calculated=H.addDays(baseDate,283);
+
+        // Permite editar
+        const userInput=prompt(
+          '🟢 Marcar PRENHA — '+female.identifier+'\n\n'+
+          'Base do cálculo: '+baseLabel+'\n'+
+          'Parto previsto sugerido: '+H.fmtDate(calculated)+' (283 dias)\n\n'+
+          'Ajuste a data se necessário (formato AAAA-MM-DD) ou deixe a sugerida:',
+          calculated
+        );
+        if(userInput===null)return; // cancelou
+        expectedBirth=userInput.trim()||calculated;
+        // Validar formato
+        if(!/^\d{4}-\d{2}-\d{2}$/.test(expectedBirth)){
+          alert('Data inválida. Use o formato AAAA-MM-DD (ex: 2026-12-31)');
+          return;
+        }
+        notesAuto=protocol?'Baseado em '+baseLabel:'Diagnóstico rápido';
+      } else {
+        notesAuto='Diagnóstico rápido';
+      }
+
+      // Permite adicionar observações
+      const obs=prompt(
+        result==='Positivo'?'✅ Parto previsto: '+H.fmtDate(expectedBirth)+'\n\nObservações (opcional):':'🔴 Marcar VAZIA — '+female.identifier+'\n\nObservações (opcional):',
+        notesAuto
+      );
+      if(obs===null)return;
+
       const data={
         cow_id:female.identifier,
         lot_id:female.lot_id||null,
         diagnosis_date:TODAY,
         result,
-        expected_birth_date:result==='Positivo'?H.addDays(TODAY,283):null,
-        notes:protocol?'Vinculado ao protocolo de '+H.fmtDate(protocol.date):null,
+        expected_birth_date:expectedBirth,
+        notes:obs||notesAuto,
       };
-      // Limpar campos vazios pra evitar erro UUID inválido
-      Object.keys(data).forEach(k=>{if(data[k]==='')data[k]=null;});
       const r=await window.SupaDB.insert('pregnancy_diagnoses',data);
-      if(!r){throw new Error('Falha ao salvar — verifique sua conexão');}
+      if(!r){throw new Error('Falha ao salvar');}
       reload();
     }catch(e){
       console.error('Erro no quickDiagnose:',e);
-      alert('Erro ao salvar diagnóstico: '+(e.message||e.toString())+'\n\nPossíveis causas:\n• Sem conexão com Supabase\n• Permissão insuficiente\n• Sessão expirada (faça login novamente)');
+      alert('Erro ao salvar diagnóstico: '+(e.message||e.toString()));
     }
+  }
+
+  // Limpar diagnóstico (volta a "sem diagnóstico")
+  async function clearDiagnosis(female){
+    if(!female._lastDiag)return;
+    if(!confirm('Remover o último diagnóstico de "'+female.identifier+'"?\n\nResultado atual: '+female._lastDiag.result+' (de '+H.fmtDate(female._lastDiag.diagnosis_date)+')\n\nA fêmea voltará para "sem diagnóstico".'))return;
+    try{
+      await window.SupaDB.remove('pregnancy_diagnoses',female._lastDiag.id);
+      reload();
+    }catch(e){alert('Erro: '+e.message);}
   }
 
   // Para cada fêmea, encontrar o último diagnóstico e o último protocolo
@@ -6639,9 +7076,15 @@ function OnlinePregnancy({user}){
       if(filterStatus!=='all'&&f._status!==filterStatus)return false;
       if(filterLot&&f.lot_id!==filterLot)return false;
       if(query&&!(f.identifier||'').toLowerCase().includes(query.toLowerCase()))return false;
+      // Filtro de safra: usa safra do último diagnóstico OU do último protocolo
+      if(seasonFilter!=='all'){
+        const diagSeason=f._lastDiag?(f._lastDiag.season||H.getSeason(f._lastDiag.diagnosis_date)):null;
+        const protSeason=f._lastProtocol?(f._lastProtocol.season||H.getSeason(f._lastProtocol.date)):null;
+        if(diagSeason!==seasonFilter&&protSeason!==seasonFilter)return false;
+      }
       return true;
     }).sort((a,b)=>(a.identifier||'').localeCompare(b.identifier||'',undefined,{numeric:true,sensitivity:'base'}));
-  },[females,filterStatus,filterLot,query]);
+  },[females,filterStatus,filterLot,query,seasonFilter]);
 
   // Estatísticas
   const stats={
@@ -6670,7 +7113,7 @@ function OnlinePregnancy({user}){
       <>
         <Card style={{marginBottom:12,padding:12}}>
           <Input value={query} onChange={e=>setQuery(e.target.value)} placeholder="🔎 Buscar por brinco..." style={{marginBottom:8}}/>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
             <Select value={filterStatus} onChange={e=>setFilterStatus(e.target.value)}>
               <option value="all">Todos status ({stats.total})</option>
               <option value="prenha">🟢 Prenhas ({stats.prenha})</option>
@@ -6682,6 +7125,7 @@ function OnlinePregnancy({user}){
               {lots.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}
             </Select>
           </div>
+          <SeasonFilter value={seasonFilter} onChange={setSeasonFilter}/>
         </Card>
 
         <Card>
@@ -6711,11 +7155,13 @@ function OnlinePregnancy({user}){
                       {f._lastDiag.expected_birth_date&&' · Parto: '+H.fmtDate(f._lastDiag.expected_birth_date)}
                     </p>}
                   </div>
-                  <div style={{display:'flex',gap:6,flexShrink:0}}>
+                  <div style={{display:'flex',gap:6,flexShrink:0,flexWrap:'wrap'}}>
                     <button onClick={()=>quickDiagnose(f,'Positivo')} title="Marcar prenha"
                       style={{padding:'5px 10px',background:'#16a34a',color:'#fff',border:'none',borderRadius:6,cursor:'pointer',fontSize:11,fontWeight:600}}>🟢 Prenha</button>
                     <button onClick={()=>quickDiagnose(f,'Negativo')} title="Marcar vazia"
                       style={{padding:'5px 10px',background:'#dc2626',color:'#fff',border:'none',borderRadius:6,cursor:'pointer',fontSize:11,fontWeight:600}}>🔴 Vazia</button>
+                    {f._lastDiag&&<button onClick={()=>clearDiagnosis(f)} title="Remover último diagnóstico (volta a sem diagnóstico)"
+                      style={{padding:'5px 10px',background:'#fff',color:'#6b7280',border:'1px solid #d1d5db',borderRadius:6,cursor:'pointer',fontSize:11}}>↺ Limpar</button>}
                   </div>
                 </div>
               </div>;
@@ -6836,6 +7282,7 @@ function OnlinePregForm({initial,lots,protocols,onSave,onCancel}){
 function OnlineExits({user}){
   const{data:items,loading,error,reload}=useSupaQuery('animal_exits',{order:{column:'date',ascending:false}});
   const[showForm,setShowForm]=useState(false);
+  const[seasonFilter,setSeasonFilter]=useState('all');
 
   async function save(data){
     try{
@@ -6849,7 +7296,7 @@ function OnlineExits({user}){
         const d=await window.SupaDB.insert('deaths',{
           animal_id:animal.identifier,category:cat,lot_id:animal.lot_id,
           death_date:data.date,cause:data.death_cause||'Desconhecida',
-          fact:data.notes||'',notes:'Criado a partir de Saída',
+          fact:data.notes||'',notes:'Criado a partir de Saída',season:data.season||H.activeSeason(),
         });
         deathId=d.id;
       }
@@ -6857,6 +7304,7 @@ function OnlineExits({user}){
         animal_id:animal.id,identifier:animal.identifier,date:data.date,reason:data.reason,
         buyer:data.buyer||null,sale_value:data.sale_value?parseFloat(data.sale_value):null,
         death_cause:data.death_cause||null,notes:data.notes||null,death_id:deathId,
+        season:data.season||H.activeSeason(),
       });
       await window.SupaDB.update('animals',animal.id,{status:'saiu',exit_date:data.date,exit_reason:data.reason});
       setShowForm(false);reload();
@@ -6865,18 +7313,27 @@ function OnlineExits({user}){
 
   const REASONS={morte:{icon:'✝',color:'red',label:'Morte'},venda:{icon:'💰',color:'green',label:'Venda'},consumo:{icon:'🍖',color:'amber',label:'Consumo'},doacao:{icon:'🎁',color:'blue',label:'Doação'},outro:{icon:'📤',color:'gray',label:'Outro'}};
 
-  return <OnlinePage title="Saída de Animais" subtitle={items.length+' saídas'} icon="📤" loading={loading} error={error}
+  const filtered=useMemo(()=>{
+    if(seasonFilter==='all')return items;
+    return items.filter(x=>(x.season||H.getSeason(x.date))===seasonFilter);
+  },[items,seasonFilter]);
+
+  return <OnlinePage title="Saída de Animais" subtitle={filtered.length+' saídas'+(seasonFilter!=='all'?' · safra '+seasonFilter:'')} icon="📤" loading={loading} error={error}
     action={<Btn onClick={()=>setShowForm(true)}>+ Nova Saída</Btn>}>
     <Alert type="info">📋 Registre saídas por venda, morte, consumo ou doação. Animal é marcado como SAIU no Inventário.</Alert>
+    <Card style={{marginBottom:12,padding:12}}>
+      <Field label="📅 Filtrar por safra"><SeasonFilter value={seasonFilter} onChange={setSeasonFilter}/></Field>
+    </Card>
     <Card>
-      {items.length===0?<EmptyState icon="📤" text="Nenhuma saída"/>:
-        items.map(x=>{
+      {filtered.length===0?<EmptyState icon="📤" text="Nenhuma saída"/>:
+        filtered.map(x=>{
           const r=REASONS[x.reason]||REASONS.outro;
           return <ListItem key={x.id}>
             <div style={{display:'flex',gap:10,alignItems:'center'}}>
               <div style={{fontSize:24}}>{r.icon}</div>
               <div>
                 <strong style={{fontSize:13}}>{x.identifier}</strong> <Badge color={r.color}>{r.label}</Badge>
+                {x.season&&<Badge color="blue">{x.season}</Badge>}
                 <p style={{fontSize:11,color:'#6b7280'}}>{H.fmtDate(x.date)}{x.buyer?' · '+x.buyer:''}{x.sale_value?' · '+H.fmtMoney(x.sale_value):''}</p>
               </div>
             </div>
@@ -6891,14 +7348,15 @@ function OnlineExits({user}){
 }
 
 function OnlineExitForm({REASONS,onSave,onCancel}){
-  const[f,setF]=useState({identifier:'',date:TODAY,reason:'venda',buyer:'',sale_value:'',death_cause:'Desconhecida',notes:''});
+  const[f,setF]=useState({identifier:'',date:TODAY,reason:'venda',buyer:'',sale_value:'',death_cause:'Desconhecida',notes:'',season:H.activeSeason()});
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   return <>
     <OnlineAnimalPicker label="Animal" required value={f.identifier} onChange={(id)=>s('identifier',id)} requireActive={true}/>
     <FormRow>
       <Field label="Data" required><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
-      <Field label="Motivo" required><Select value={f.reason} onChange={e=>s('reason',e.target.value)}>{Object.entries(REASONS).map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}</Select></Field>
+      <SeasonField value={f.season} onChange={v=>s('season',v)}/>
     </FormRow>
+    <Field label="Motivo" required><Select value={f.reason} onChange={e=>s('reason',e.target.value)}>{Object.entries(REASONS).map(([k,r])=><option key={k} value={k}>{r.icon} {r.label}</option>)}</Select></Field>
     {f.reason==='venda'&&<FormRow>
       <Field label="Comprador"><Input value={f.buyer} onChange={e=>s('buyer',e.target.value)}/></Field>
       <Field label="Valor (R$)"><Input type="number" step="0.01" value={f.sale_value} onChange={e=>s('sale_value',e.target.value)}/></Field>
@@ -6915,6 +7373,7 @@ function OnlineRevenues({user}){
   const{data:items,loading,error,reload}=useSupaQuery('revenues',{order:{column:'date',ascending:false}});
   const[showForm,setShowForm]=useState(false);
   const[editing,setEditing]=useState(null);
+  const[seasonFilter,setSeasonFilter]=useState('all');
 
   async function save(data){
     try{
@@ -6928,16 +7387,26 @@ function OnlineRevenues({user}){
     try{await window.SupaDB.remove('revenues',id);reload();}
     catch(e){alert('Erro: '+e.message);}
   }
-  const total=items.reduce((s,r)=>s+(parseFloat(r.total_value)||0),0);
 
-  return <OnlinePage title="Receitas" subtitle={H.fmtMoney(total)+' total'} icon="💰" loading={loading} error={error}
+  const filtered=useMemo(()=>{
+    if(seasonFilter==='all')return items;
+    return items.filter(r=>(r.season||H.getSeason(r.date))===seasonFilter);
+  },[items,seasonFilter]);
+  const total=filtered.reduce((s,r)=>s+(parseFloat(r.total_value)||0),0);
+  const totalQty=filtered.reduce((s,r)=>s+(parseInt(r.quantity)||0),0);
+
+  return <OnlinePage title="Receitas" subtitle={H.fmtMoney(total)+' · '+totalQty+' cabeças'+(seasonFilter!=='all'?' · safra '+seasonFilter:'')} icon="💰" loading={loading} error={error}
     action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Lançar</Btn>}>
+    <Card style={{marginBottom:12,padding:12}}>
+      <Field label="📅 Filtrar por safra"><SeasonFilter value={seasonFilter} onChange={setSeasonFilter}/></Field>
+    </Card>
     <Card>
-      {items.length===0?<EmptyState icon="💰" text="Sem receitas"/>:
-        items.map(r=><ListItem key={r.id} onClick={()=>{setEditing(r);setShowForm(true);}}>
+      {filtered.length===0?<EmptyState icon="💰" text="Sem receitas"/>:
+        filtered.map(r=><ListItem key={r.id} onClick={()=>{setEditing(r);setShowForm(true);}}>
           <div style={{display:'flex',justifyContent:'space-between'}}>
             <div>
               <strong style={{fontSize:13,color:'#166534'}}>{H.fmtMoney(r.total_value)}</strong> <Badge color="green">{r.category}</Badge>
+              {r.season&&<Badge color="blue">{r.season}</Badge>}
               <p style={{fontSize:11,color:'#6b7280'}}>{r.quantity} cab · {H.fmtDate(r.date)}</p>
             </div>
             <button onClick={e=>{e.stopPropagation();del(r.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>
@@ -6952,18 +7421,21 @@ function OnlineRevenues({user}){
 }
 
 function OnlineRevenueForm({initial,onSave,onCancel}){
-  const[f,setF]=useState({date:TODAY,category:'Bezerros',quantity:1,sex:'Macho',sale_type:'Venda direta',total_value:'',per_head_value:'',notes:'',...initial});
+  const[f,setF]=useState({date:TODAY,category:'Bezerros',quantity:1,sex:'Macho',sale_type:'Venda direta',total_value:'',per_head_value:'',notes:'',season:H.activeSeason(),...initial});
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   return <>
     <FormRow>
       <Field label="Data"><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
-      <Field label="Categoria"><Select value={f.category} onChange={e=>s('category',e.target.value)}>{['Bezerros','Vacas de descarte','Novilhas','Reprodutores','Outro'].map(c=><option key={c}>{c}</option>)}</Select></Field>
+      <SeasonField value={f.season} onChange={v=>s('season',v)}/>
     </FormRow>
     <FormRow>
+      <Field label="Categoria"><Select value={f.category} onChange={e=>s('category',e.target.value)}>{['Bezerros','Vacas de descarte','Novilhas','Reprodutores','Outro'].map(c=><option key={c}>{c}</option>)}</Select></Field>
       <Field label="Quantidade" required><Input type="number" value={f.quantity||''} onChange={e=>s('quantity',parseInt(e.target.value)||0)}/></Field>
-      <Field label="Sexo"><Select value={f.sex} onChange={e=>s('sex',e.target.value)}><option>Macho</option><option>Fêmea</option><option>Misto</option></Select></Field>
     </FormRow>
-    <Field label="Tipo Venda"><Select value={f.sale_type} onChange={e=>s('sale_type',e.target.value)}>{['Venda direta','Frigorífico','Leilão','Outro'].map(t=><option key={t}>{t}</option>)}</Select></Field>
+    <FormRow>
+      <Field label="Sexo"><Select value={f.sex} onChange={e=>s('sex',e.target.value)}><option>Macho</option><option>Fêmea</option><option>Misto</option></Select></Field>
+      <Field label="Tipo Venda"><Select value={f.sale_type} onChange={e=>s('sale_type',e.target.value)}>{['Venda direta','Frigorífico','Leilão','Outro'].map(t=><option key={t}>{t}</option>)}</Select></Field>
+    </FormRow>
     <FormRow>
       <Field label="Valor Total (R$)" required><Input type="number" step="0.01" value={f.total_value||''} onChange={e=>{const v=e.target.value;s('total_value',v?parseFloat(v):null);if(v&&f.quantity>0)s('per_head_value',(parseFloat(v)/f.quantity).toFixed(2));}}/></Field>
       <Field label="Valor/Cab"><Input type="number" step="0.01" value={f.per_head_value||''} onChange={e=>s('per_head_value',parseFloat(e.target.value)||null)}/></Field>
@@ -6979,6 +7451,7 @@ function OnlineCosts({user}){
   const{data:items,loading,error,reload}=useSupaQuery('costs',{order:{column:'date',ascending:false}});
   const[showForm,setShowForm]=useState(false);
   const[editing,setEditing]=useState(null);
+  const[seasonFilter,setSeasonFilter]=useState('all');
 
   async function save(data){
     try{
@@ -6992,21 +7465,29 @@ function OnlineCosts({user}){
     try{await window.SupaDB.remove('costs',id);reload();}
     catch(e){alert('Erro: '+e.message);}
   }
-  const totalCusteio=items.filter(c=>c.type==='Custeio').reduce((s,c)=>s+(parseFloat(c.value)||0),0);
-  const totalInvest=items.filter(c=>c.type==='Investimento').reduce((s,c)=>s+(parseFloat(c.value)||0),0);
+  const filtered=useMemo(()=>{
+    if(seasonFilter==='all')return items;
+    return items.filter(c=>(c.season||H.getSeason(c.date))===seasonFilter);
+  },[items,seasonFilter]);
+  const totalCusteio=filtered.filter(c=>c.type==='Custeio').reduce((s,c)=>s+(parseFloat(c.value)||0),0);
+  const totalInvest=filtered.filter(c=>c.type==='Investimento').reduce((s,c)=>s+(parseFloat(c.value)||0),0);
 
-  return <OnlinePage title="Custos" subtitle={H.fmtMoney(totalCusteio+totalInvest)+' total'} icon="💵" loading={loading} error={error}
+  return <OnlinePage title="Custos" subtitle={H.fmtMoney(totalCusteio+totalInvest)+(seasonFilter!=='all'?' · safra '+seasonFilter:' total')} icon="💵" loading={loading} error={error}
     action={<Btn onClick={()=>{setEditing(null);setShowForm(true);}}>+ Lançar</Btn>}>
+    <Card style={{marginBottom:12,padding:12}}>
+      <Field label="📅 Filtrar por safra"><SeasonFilter value={seasonFilter} onChange={setSeasonFilter}/></Field>
+    </Card>
     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
       <StatCard label="Custeio" value={H.fmtMoney(totalCusteio)} color="amber"/>
       <StatCard label="Investimentos" value={H.fmtMoney(totalInvest)} color="blue"/>
     </div>
     <Card>
-      {items.length===0?<EmptyState icon="💵" text="Sem custos"/>:
-        items.map(c=><ListItem key={c.id} onClick={()=>{setEditing(c);setShowForm(true);}}>
+      {filtered.length===0?<EmptyState icon="💵" text="Sem custos"/>:
+        filtered.map(c=><ListItem key={c.id} onClick={()=>{setEditing(c);setShowForm(true);}}>
           <div style={{display:'flex',justifyContent:'space-between'}}>
             <div>
               <strong style={{fontSize:13,color:'#dc2626'}}>{H.fmtMoney(c.value)}</strong> <Badge color={c.type==='Custeio'?'amber':'blue'}>{c.type}</Badge>
+              {c.season&&<Badge color="gray">{c.season}</Badge>}
               <p style={{fontSize:11,color:'#6b7280'}}>{c.description||c.subcategory} · {H.fmtDate(c.date)}</p>
             </div>
             <button onClick={e=>{e.stopPropagation();del(c.id);}} style={{fontSize:11,color:'#dc2626',background:'none',border:'none',cursor:'pointer'}}>×</button>
@@ -7021,16 +7502,19 @@ function OnlineCosts({user}){
 }
 
 function OnlineCostForm({initial,onSave,onCancel}){
-  const[f,setF]=useState({date:TODAY,type:'Custeio',category:'Produção',subcategory:'',value:'',description:'',cost_center:'',notes:'',...initial});
+  const[f,setF]=useState({date:TODAY,type:'Custeio',category:'Produção',subcategory:'',value:'',description:'',cost_center:'',notes:'',season:H.activeSeason(),...initial});
   const s=(k,v)=>setF(p=>({...p,[k]:v}));
   const struct=H.CSTRUCT[f.category];
   const subOptions=struct?.subs||[];
   return <>
     <FormRow>
       <Field label="Data"><Input type="date" value={f.date} onChange={e=>s('date',e.target.value)}/></Field>
-      <Field label="Tipo" required><Select value={f.type} onChange={e=>s('type',e.target.value)}>{H.CTYPES.map(t=><option key={t}>{t}</option>)}</Select></Field>
+      <SeasonField value={f.season} onChange={v=>s('season',v)}/>
     </FormRow>
-    <Field label="Categoria"><Select value={f.category} onChange={e=>{s('category',e.target.value);s('subcategory','');}}>{Object.keys(H.CSTRUCT).map(c=><option key={c}>{c}</option>)}</Select></Field>
+    <FormRow>
+      <Field label="Tipo" required><Select value={f.type} onChange={e=>s('type',e.target.value)}>{H.CTYPES.map(t=><option key={t}>{t}</option>)}</Select></Field>
+      <Field label="Categoria"><Select value={f.category} onChange={e=>{s('category',e.target.value);s('subcategory','');}}>{Object.keys(H.CSTRUCT).map(c=><option key={c}>{c}</option>)}</Select></Field>
+    </FormRow>
     {subOptions.length>0&&<Field label="Subcategoria" required><Select value={f.subcategory||''} onChange={e=>s('subcategory',e.target.value)}><option value="">—</option>{subOptions.map(x=><option key={x}>{x}</option>)}</Select></Field>}
     <FormRow>
       <Field label="Valor (R$)" required><Input type="number" step="0.01" value={f.value||''} onChange={e=>s('value',parseFloat(e.target.value)||null)}/></Field>
@@ -7476,40 +7960,93 @@ function OnlineExport({user}){
       const tables=['animals','pastures','lots','births','deaths','weighings',
         'reproductive_protocols','pregnancy_diagnoses','health_managements',
         'herbicide_applications','mineral_supplementations','feces_records',
-        'animal_exits','animal_lot_history','pasture_movements'];
+        'animal_exits','animal_lot_history','pasture_movements','services'];
       if(user.role==='admin'){tables.push('revenues','costs','farm_settings');}
 
       const backup={
         _meta:{
-          source:'PecuáriaManager Online',
+          source:'PecuariaManager Online',
           exported_at:new Date().toISOString(),
           exported_by:user.email,
-          version:'1.0',
+          version:'1.1',
         },
         data:{},
       };
+
+      // Buscar tabelas uma a uma com log de progresso visível
+      let totalRecords=0;
+      const errors=[];
       for(const t of tables){
         try{
-          backup.data[t]=await window.SupaDB.get(t);
+          setLastExport({table:t,label:'⏳ Buscando '+t+'...',count:0,when:new Date().toLocaleTimeString()});
+          const rows=await window.SupaDB.get(t);
+          backup.data[t]=rows||[];
+          totalRecords+=(rows||[]).length;
+          console.log('[backup] '+t+': '+(rows||[]).length+' registros');
         }catch(e){
           backup.data[t]=[];
-          console.warn(`Erro em ${t}:`,e.message);
+          errors.push(t+': '+e.message);
+          console.warn('[backup] erro em '+t+':',e.message);
         }
       }
 
       const json=JSON.stringify(backup,null,2);
-      const blob=new Blob([json],{type:'application/json'});
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');
-      a.href=url;
-      a.download=`pecuaria-backup-online-${TODAY}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const sizeKb=Math.round(json.length/1024);
+      console.log('[backup] JSON gerado: '+sizeKb+' KB · '+totalRecords+' registros');
 
-      const totalRecords=Object.values(backup.data).reduce((s,arr)=>s+(Array.isArray(arr)?arr.length:0),0);
-      alert(`✅ Backup completo baixado!\n\n${tables.length} tabelas · ${totalRecords} registros total`);
-      setLastExport({table:'__backup__',label:'Backup completo (JSON)',count:totalRecords,when:new Date().toLocaleTimeString()});
-    }catch(e){alert('Erro: '+e.message);}
+      const filename='pecuaria-backup-online-'+TODAY+'.json';
+
+      // MÉTODO 1: download via Blob + anchor (anexar no DOM e remover)
+      let downloaded=false;
+      try{
+        const blob=new Blob([json],{type:'application/json;charset=utf-8'});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');
+        a.href=url;
+        a.download=filename;
+        a.style.display='none';
+        document.body.appendChild(a);
+        a.click();
+        // Aguarda um pouco antes de limpar (evita cancelar o download em alguns browsers)
+        await new Promise(r=>setTimeout(r,200));
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        downloaded=true;
+      }catch(e){
+        console.warn('[backup] download via blob falhou:',e);
+      }
+
+      // MÉTODO 2 (fallback): abrir em nova aba pra você salvar manualmente
+      if(!downloaded){
+        try{
+          const dataUrl='data:application/json;charset=utf-8,'+encodeURIComponent(json);
+          const w=window.open(dataUrl,'_blank');
+          if(!w){
+            // popup bloqueado: copiar pro clipboard como último recurso
+            await navigator.clipboard.writeText(json);
+            alert('⚠ Não foi possível baixar automaticamente.\n\nO conteúdo do backup foi COPIADO PARA A ÁREA DE TRANSFERÊNCIA.\n\nAbra o Bloco de Notas (ou outro editor), cole (Ctrl+V) e salve com o nome:\n\n'+filename);
+          } else {
+            alert('⚠ Download direto bloqueado pelo navegador.\n\nAbri o backup numa nova aba. No menu do navegador clique em "Salvar página como..." e salve com o nome:\n\n'+filename);
+          }
+          downloaded=true;
+        }catch(e){
+          console.error('[backup] todos métodos falharam:',e);
+        }
+      }
+
+      let msg='✅ Backup completo!\n\n';
+      msg+='📊 '+tables.length+' tabelas · '+totalRecords+' registros · '+sizeKb+' KB\n\n';
+      if(errors.length>0){
+        msg+='⚠ '+errors.length+' tabela(s) com problema (ver console F12):\n'+errors.slice(0,5).join('\n')+'\n\n';
+      }
+      msg+='💾 Arquivo: '+filename;
+
+      alert(msg);
+      setLastExport({table:'__backup__',label:'✅ Backup ('+sizeKb+' KB)',count:totalRecords,when:new Date().toLocaleTimeString()});
+    }catch(e){
+      console.error('[backup] erro fatal:',e);
+      alert('❌ Erro ao gerar backup: '+e.message+'\n\nAbra o console (F12) pra ver detalhes.');
+    }
     finally{setExporting(false);}
   }
 
@@ -7579,12 +8116,20 @@ function OnlineExport({user}){
 /* ─── ANÁLISES ONLINE (admin only) ─── */
 function OnlineAnalysis({user}){
   if(user.role!=='admin')return <div style={{padding:32,textAlign:'center'}}><div style={{fontSize:48}}>🔒</div><p style={{color:'#6b7280',marginTop:12}}>Acesso restrito</p></div>;
-  const{data:revenues,loading:lR}=useSupaQuery('revenues');
-  const{data:costs,loading:lC}=useSupaQuery('costs');
-  const{data:births,loading:lB}=useSupaQuery('births');
+  const{data:revenuesAll,loading:lR}=useSupaQuery('revenues');
+  const{data:costsAll,loading:lC}=useSupaQuery('costs');
+  const{data:birthsAll,loading:lB}=useSupaQuery('births');
   const{data:animals,loading:lA}=useSupaQuery('animals');
-  const{data:pregnancies,loading:lP}=useSupaQuery('pregnancy_diagnoses');
+  const{data:pregnanciesAll,loading:lP}=useSupaQuery('pregnancy_diagnoses');
   const loading=lR||lC||lB||lA||lP;
+  const[seasonFilter,setSeasonFilter]=useState('all');
+
+  // Filtrar por safra
+  const sf=(arr,dateField)=>seasonFilter==='all'?arr:arr.filter(x=>(x.season||H.getSeason(x[dateField]))===seasonFilter);
+  const revenues=sf(revenuesAll,'date');
+  const costs=sf(costsAll,'date');
+  const births=sf(birthsAll,'birth_date');
+  const pregnancies=sf(pregnanciesAll,'diagnosis_date');
 
   const totalRevenue=revenues.reduce((s,r)=>s+(parseFloat(r.total_value)||0),0);
   const totalCost=costs.reduce((s,c)=>s+(parseFloat(c.value)||0),0);
@@ -7604,8 +8149,10 @@ function OnlineAnalysis({user}){
     costsByCat[cat]=(costsByCat[cat]||0)+(parseFloat(c.value)||0);
   });
 
-  return <OnlinePage title="Análises" subtitle="Resumo financeiro e produtivo" icon="📊" loading={loading}>
-    <Alert type="info">📈 Análises calculadas com base em todos os dados cadastrados.</Alert>
+  return <OnlinePage title="Análises" subtitle={seasonFilter==='all'?'Todos os dados':'Safra '+seasonFilter} icon="📊" loading={loading}>
+    <Card style={{marginBottom:12,padding:12}}>
+      <Field label="📅 Filtrar por safra"><SeasonFilter value={seasonFilter} onChange={setSeasonFilter}/></Field>
+    </Card>
 
     <Card style={{marginBottom:12}}>
       <CardHeader title="💰 Resumo Financeiro" icon=""/>
@@ -7666,45 +8213,59 @@ function OnlineSafraReport({user}){
   const{data:pregnancies,loading:lP}=useSupaQuery('pregnancy_diagnoses');
   const{data:revenues,loading:lR}=useSupaQuery('revenues');
   const{data:costs,loading:lC}=useSupaQuery('costs');
+  const{data:protocols}=useSupaQuery('reproductive_protocols');
   const{data:lots}=useSupaQuery('lots');
   const{data:pastures}=useSupaQuery('pastures');
   const loading=lA||lB||lD||lE||lP||lR||lC;
 
-  const[year,setYear]=useState(new Date().getFullYear());
+  const[selSeason,setSelSeason]=useState(H.activeSeason());
 
-  function inYear(dateStr){
-    if(!dateStr)return false;
-    return String(dateStr).startsWith(String(year));
-  }
+  // Filtrar pelo campo "season" (com fallback pra calcular pela data se vazio)
+  const inSeason=(rec,dateField)=>{
+    const s=rec.season||H.getSeason(rec[dateField]);
+    return s===selSeason;
+  };
 
-  const yearBirths=births.filter(b=>inYear(b.birth_date));
-  const yearDeaths=deaths.filter(d=>inYear(d.death_date));
-  const yearExits=exits.filter(x=>inYear(x.date));
-  const yearPregs=pregnancies.filter(p=>inYear(p.diagnosis_date));
-  const yearRevenues=revenues.filter(r=>inYear(r.date));
-  const yearCosts=costs.filter(c=>inYear(c.date));
+  const seasonBirths=births.filter(b=>inSeason(b,'birth_date'));
+  const seasonDeaths=deaths.filter(d=>inSeason(d,'death_date'));
+  const seasonExits=exits.filter(x=>inSeason(x,'date'));
+  const seasonPregs=pregnancies.filter(p=>inSeason(p,'diagnosis_date'));
+  const seasonRevenues=revenues.filter(r=>inSeason(r,'date'));
+  const seasonCosts=costs.filter(c=>inSeason(c,'date'));
+  const seasonProtocols=protocols?protocols.filter(p=>inSeason(p,'date')):[];
 
-  const totalRev=yearRevenues.reduce((s,r)=>s+(parseFloat(r.total_value)||0),0);
-  const totalCost=yearCosts.reduce((s,c)=>s+(parseFloat(c.value)||0),0);
+  const totalRev=seasonRevenues.reduce((s,r)=>s+(parseFloat(r.total_value)||0),0);
+  const totalCost=seasonCosts.reduce((s,c)=>s+(parseFloat(c.value)||0),0);
   const totalArea=pastures.reduce((s,p)=>s+(parseFloat(p.area_ha)||0),0);
   const activeAnimals=animals.filter(a=>(a.status||'ativo')==='ativo').length;
-  const positivePregs=yearPregs.filter(p=>p.result==='Positivo').length;
-  const pregRate=yearPregs.length>0?(positivePregs/yearPregs.length)*100:0;
-  const mortalityRate=activeAnimals>0?(yearDeaths.length/activeAnimals)*100:0;
+  const positivePregs=seasonPregs.filter(p=>p.result==='Positivo').length;
+  const negativePregs=seasonPregs.filter(p=>p.result==='Negativo').length;
+  const pregRate=seasonPregs.length>0?(positivePregs/seasonPregs.length)*100:0;
+  const mortalityRate=activeAnimals>0?(seasonDeaths.length/activeAnimals)*100:0;
+
+  // Vendas detalhadas
+  const venda=seasonExits.filter(x=>x.reason==='venda');
+  const totalSold=venda.length;
+  const totalSoldValue=venda.reduce((s,x)=>s+(parseFloat(x.sale_value)||0),0);
+
+  // Inseminações por raça
+  const racesUsed={};
+  seasonProtocols.forEach(p=>{
+    if(p.bull_race){racesUsed[p.bull_race]=(racesUsed[p.bull_race]||0)+1;}
+  });
 
   function doPrint(){window.print();}
 
-  return <OnlinePage title="Relatório de Safra" subtitle="Imprimível / PDF" icon="📑"
+  return <OnlinePage title="Relatório de Safra" subtitle={'Safra '+selSeason} icon="📑"
     action={<Btn onClick={doPrint}>🖨 Imprimir</Btn>} loading={loading}>
     <Card style={{marginBottom:12,padding:12}} className="no-print">
-      <Field label="Ano da Safra"><Select value={year} onChange={e=>setYear(parseInt(e.target.value))}>
-        {[year+1,year,year-1,year-2,year-3,year-4].map(y=><option key={y} value={y}>{y}</option>)}
-      </Select></Field>
+      <Field label="Safra do relatório"><SeasonFilter value={selSeason} onChange={setSelSeason} allLabel="(escolha uma safra específica)"/></Field>
+      <p style={{fontSize:11,color:'#6b7280',marginTop:8}}>📅 Safra brasileira: julho a junho. Ex: "25/26" = jul/2025 a jun/2026.</p>
     </Card>
 
     <div id="safra-print" style={{background:'#fff',padding:'24px',borderRadius:12,fontSize:12,lineHeight:1.5}}>
       <div style={{textAlign:'center',marginBottom:20,borderBottom:'2px solid #166534',paddingBottom:10}}>
-        <h1 style={{fontSize:22,color:'#166534',marginBottom:4}}>📑 RELATÓRIO DE SAFRA {year}</h1>
+        <h1 style={{fontSize:22,color:'#166534',marginBottom:4}}>📑 RELATÓRIO DE SAFRA {selSeason}</h1>
         <p style={{fontSize:12,color:'#6b7280'}}>Gerado em {new Date().toLocaleDateString('pt-BR')}</p>
       </div>
 
@@ -7718,26 +8279,38 @@ function OnlineSafraReport({user}){
         </tbody>
       </table>
 
-      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>🐮 PRODUÇÃO {year}</h2>
+      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>🐮 PRODUÇÃO {selSeason}</h2>
       <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
         <tbody>
-          <tr><td style={{padding:'4px 0'}}><strong>Nascimentos:</strong></td><td style={{textAlign:'right'}}>{yearBirths.length}</td></tr>
-          <tr><td style={{padding:'4px 0'}}><strong>Mortes:</strong></td><td style={{textAlign:'right'}}>{yearDeaths.length}</td></tr>
-          <tr><td style={{padding:'4px 0'}}><strong>Saídas (vendas/etc):</strong></td><td style={{textAlign:'right'}}>{yearExits.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Nascimentos:</strong></td><td style={{textAlign:'right'}}>{seasonBirths.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Mortes:</strong></td><td style={{textAlign:'right'}}>{seasonDeaths.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Saídas (total):</strong></td><td style={{textAlign:'right'}}>{seasonExits.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>&nbsp;&nbsp;• Vendas:</strong></td><td style={{textAlign:'right'}}>{totalSold} cab — {H.fmtMoney(totalSoldValue)}</td></tr>
           <tr><td style={{padding:'4px 0'}}><strong>Taxa de mortalidade:</strong></td><td style={{textAlign:'right'}}>{mortalityRate.toFixed(2)}%</td></tr>
         </tbody>
       </table>
 
-      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>🤰 REPRODUÇÃO {year}</h2>
+      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>🤰 REPRODUÇÃO {selSeason}</h2>
       <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
         <tbody>
-          <tr><td style={{padding:'4px 0'}}><strong>Diagnósticos no ano:</strong></td><td style={{textAlign:'right'}}>{yearPregs.length}</td></tr>
-          <tr><td style={{padding:'4px 0'}}><strong>Positivos:</strong></td><td style={{textAlign:'right'}}>{positivePregs}</td></tr>
-          <tr><td style={{padding:'4px 0'}}><strong>Taxa de prenhez:</strong></td><td style={{textAlign:'right'}}>{pregRate.toFixed(1)}%</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Inseminações realizadas:</strong></td><td style={{textAlign:'right'}}>{seasonProtocols.length}</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Diagnósticos:</strong></td><td style={{textAlign:'right'}}>{seasonPregs.length} ({positivePregs} positivos, {negativePregs} negativos)</td></tr>
+          <tr><td style={{padding:'4px 0'}}><strong>Taxa de prenhez:</strong></td><td style={{textAlign:'right',fontWeight:700,color:'#166534'}}>{pregRate.toFixed(1)}%</td></tr>
         </tbody>
       </table>
 
-      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>💰 FINANCEIRO {year}</h2>
+      {Object.keys(racesUsed).length>0&&<>
+        <h3 style={{fontSize:13,color:'#166534',marginTop:12,marginBottom:6}}>🐂 Inseminações por raça do touro:</h3>
+        <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
+          <tbody>
+            {Object.entries(racesUsed).sort((a,b)=>b[1]-a[1]).map(([race,count])=>
+              <tr key={race}><td style={{padding:'3px 0'}}>{race}:</td><td style={{textAlign:'right'}}>{count} inseminações</td></tr>
+            )}
+          </tbody>
+        </table>
+      </>}
+
+      <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>💰 FINANCEIRO {selSeason}</h2>
       <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
         <tbody>
           <tr><td style={{padding:'4px 0'}}><strong>Receitas:</strong></td><td style={{textAlign:'right',color:'#166534'}}>{H.fmtMoney(totalRev)}</td></tr>
@@ -7746,8 +8319,8 @@ function OnlineSafraReport({user}){
         </tbody>
       </table>
 
-      {yearBirths.length>0&&<>
-        <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>🐮 LISTA DE NASCIMENTOS {year}</h2>
+      {seasonBirths.length>0&&<>
+        <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>🐮 LISTA DE NASCIMENTOS</h2>
         <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
           <thead>
             <tr style={{background:'#f3f4f6'}}>
@@ -7759,12 +8332,34 @@ function OnlineSafraReport({user}){
             </tr>
           </thead>
           <tbody>
-            {yearBirths.map(b=><tr key={b.id}>
+            {seasonBirths.map(b=><tr key={b.id}>
               <td style={{padding:6,border:'1px solid #e5e7eb'}}>{b.calf_id}</td>
               <td style={{padding:6,border:'1px solid #e5e7eb'}}>{b.mother_id}</td>
               <td style={{padding:6,border:'1px solid #e5e7eb',textAlign:'center'}}>{b.calf_sex}</td>
               <td style={{padding:6,border:'1px solid #e5e7eb',textAlign:'right'}}>{b.birth_weight} kg</td>
               <td style={{padding:6,border:'1px solid #e5e7eb',textAlign:'center'}}>{H.fmtDate(b.birth_date)}</td>
+            </tr>)}
+          </tbody>
+        </table>
+      </>}
+
+      {venda.length>0&&<>
+        <h2 style={{fontSize:14,color:'#166534',marginTop:16,marginBottom:8}}>💰 VENDAS</h2>
+        <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
+          <thead>
+            <tr style={{background:'#f3f4f6'}}>
+              <th style={{padding:6,textAlign:'left',border:'1px solid #e5e7eb'}}>Animal</th>
+              <th style={{padding:6,textAlign:'left',border:'1px solid #e5e7eb'}}>Comprador</th>
+              <th style={{padding:6,textAlign:'right',border:'1px solid #e5e7eb'}}>Valor</th>
+              <th style={{padding:6,textAlign:'center',border:'1px solid #e5e7eb'}}>Data</th>
+            </tr>
+          </thead>
+          <tbody>
+            {venda.map(v=><tr key={v.id}>
+              <td style={{padding:6,border:'1px solid #e5e7eb'}}>{v.identifier}</td>
+              <td style={{padding:6,border:'1px solid #e5e7eb'}}>{v.buyer||'—'}</td>
+              <td style={{padding:6,border:'1px solid #e5e7eb',textAlign:'right'}}>{v.sale_value?H.fmtMoney(v.sale_value):'—'}</td>
+              <td style={{padding:6,border:'1px solid #e5e7eb',textAlign:'center'}}>{H.fmtDate(v.date)}</td>
             </tr>)}
           </tbody>
         </table>
@@ -8849,7 +9444,14 @@ function App(){
         // Tentar restaurar sessão Supabase
         try{
           const profile=await window.SupaDB.restoreSession();
-          if(profile)setOnlineUser(profile);
+          if(profile){
+            setOnlineUser(profile);
+            // Carregar safra global das configs
+            try{
+              const cfg=await window.SupaDB.getSettings();
+              window.CURRENT_SEASON=cfg?.current_season||H.currentSeason();
+            }catch(e){window.CURRENT_SEASON=H.currentSeason();}
+          }
         }catch(e){console.warn('Sessão não restaurada:',e);}
         setCheckingSession(false);
       } else {
@@ -8880,7 +9482,15 @@ function App(){
   const handleLogout=()=>{localStorage.removeItem('pm_user');setUser(null);setPage('dashboard');};
   const handleNav=p=>{setPage(p);window.scrollTo(0,0);};
 
-  const handleOnlineLogin=u=>{setOnlineUser(u);setOnlinePage('online-dashboard');};
+  const handleOnlineLogin=async u=>{
+    setOnlineUser(u);
+    setOnlinePage('online-dashboard');
+    // Carregar safra global das configs
+    try{
+      const cfg=await window.SupaDB.getSettings();
+      window.CURRENT_SEASON=cfg?.current_season||H.currentSeason();
+    }catch(e){window.CURRENT_SEASON=H.currentSeason();}
+  };
   async function handleOnlineLogout(){
     try{await window.SupaDB.signOut();}catch{}
     setOnlineUser(null);setOnlinePage('online-dashboard');
